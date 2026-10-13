@@ -1136,7 +1136,7 @@ def reset_mode_resolution() -> None:
 
 RECALL_TIERS: tuple[str, ...] = (
     "fts", "semantic", "hyde", "multi_repr", "fuzzy", "graph", "episode", "atomic_facts",
-    "directives", "multi_query",
+    "directives", "multi_query", "query_entity",
 )
 
 DEFAULT_RECALL_TIER_WEIGHTS: dict[str, float] = {
@@ -1156,6 +1156,12 @@ DEFAULT_RECALL_TIER_WEIGHTS: dict[str, float] = {
     # Off by default: neutral on LoCoMo and LongMemEval-S held-out splits
     # (docs/benchmarks/tier-ablation-v14), costs ~20 ms when it fires.
     "multi_query": 0.0,
+    # Records linked to graph entities named in the query, weighted by entity
+    # specificity (memory_core.retrieval_tiers.query_entity_candidates). Off by
+    # default: on LoCoMo with an entity graph it moved held-out R@10 by -0.1 to
+    # -0.4 points at weights 0.3-1.0 (docs/benchmarks/pmb-adoption-recall).
+    # While it is 0 the relational router's post-rerank injection runs instead.
+    "query_entity": 0.0,
 }
 
 _tier_weights_cache: dict[str, dict[str, float]] = {}
@@ -1395,3 +1401,157 @@ def get_user_turn_boost() -> float:
                                             extra={"value": raw})
         return DEFAULT_USER_TURN_BOOST
     return value if value > 0 else DEFAULT_USER_TURN_BOOST
+
+
+# ──────────────────────────────────────────────
+# Recall pipeline knobs (14.9)
+# ──────────────────────────────────────────────
+
+
+def _env_number(name: str, default: float, *, minimum: float, integer: bool = False) -> float:
+    """Number from the environment; malformed or below `minimum` is logged and replaced by `default`."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value: float | None = int(raw) if integer else float(raw)
+    except ValueError:
+        value = None
+    if value is None or math.isnan(value) or math.isinf(value) or value < minimum:
+        import logging
+        logging.getLogger(__name__).warning("ignoring malformed setting, using default",
+                                            extra={"setting": name, "value": raw})
+        return default
+    return value
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    import logging
+    logging.getLogger(__name__).warning("ignoring malformed setting, using default",
+                                        extra={"setting": name, "value": raw})
+    return default
+
+
+# Usage statistics (recall_count, last_recalled) are buffered and written by a
+# background thread every MEMORY_RECALL_TOUCH_FLUSH_MS milliseconds.
+DEFAULT_RECALL_TOUCH_FLUSH_MS = 250
+MIN_RECALL_TOUCH_FLUSH_MS = 10
+
+
+def get_recall_touch_flush_ms() -> int:
+    return int(_env_number("MEMORY_RECALL_TOUCH_FLUSH_MS", DEFAULT_RECALL_TOUCH_FLUSH_MS,
+                           minimum=MIN_RECALL_TOUCH_FLUSH_MS, integer=True))
+
+
+# Concurrent identical recalls (same project, normalised query, limit and
+# options) share one execution; a waiter gives up after this many seconds and
+# runs its own search.
+DEFAULT_RECALL_SINGLEFLIGHT_WAIT_SECONDS = 30.0
+
+
+def get_recall_singleflight_enabled() -> bool:
+    return _env_flag("MEMORY_RECALL_SINGLEFLIGHT", True)
+
+
+def get_recall_singleflight_wait_seconds() -> float:
+    return _env_number("MEMORY_RECALL_SINGLEFLIGHT_WAIT_SECONDS", DEFAULT_RECALL_SINGLEFLIGHT_WAIT_SECONDS,
+                       minimum=0.0)
+
+
+# The fts tier's fusion weight is multiplied by this factor when none of the
+# query's content words occurs in the full-text vocabulary (a question in one
+# language over records in another): its matches then rest on function words.
+# 1.0 switches the damping off.
+DEFAULT_RECALL_FTS_CROSSLINGUAL_DAMP = 0.3
+
+
+def get_recall_fts_crosslingual_damp() -> float:
+    value = _env_number("MEMORY_RECALL_FTS_CROSSLINGUAL_DAMP", DEFAULT_RECALL_FTS_CROSSLINGUAL_DAMP, minimum=0.0)
+    return min(value, 1.0)
+
+
+# Query intent -> fused-score multiplier for the record types that answer it
+# (memory_core.query_shapes.query_intents). Override with
+#   MEMORY_RECALL_INTENT_BOOSTS=decision=1.5,lesson=1.2,howto=1.0
+# A multiplier of 1.0 switches an intent off.
+RECALL_INTENT_TYPES: dict[str, tuple[str, ...]] = {
+    "decision": ("decision",),
+    "lesson": ("lesson", "convention"),
+    "howto": ("solution",),
+}
+DEFAULT_RECALL_INTENT_BOOSTS: dict[str, float] = {"decision": 1.3, "lesson": 1.3, "howto": 1.3}
+_intent_boosts_cache: dict[str, dict[str, float]] = {}
+
+
+def parse_intent_boosts(raw: str | None) -> dict[str, float]:
+    """Parse ``intent=multiplier,...``; unknown intents or non-positive values raise ValueError."""
+    boosts = dict(DEFAULT_RECALL_INTENT_BOOSTS)
+    if raw is None or not raw.strip():
+        return boosts
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        name, sep, value = part.partition("=")
+        name = name.strip().lower()
+        if not sep or name not in RECALL_INTENT_TYPES:
+            raise ValueError(f"MEMORY_RECALL_INTENT_BOOSTS: unknown intent {name!r}; "
+                             f"known intents: {', '.join(RECALL_INTENT_TYPES)}")
+        try:
+            boost = float(value.strip())
+        except ValueError as error:
+            raise ValueError(f"MEMORY_RECALL_INTENT_BOOSTS: {name} needs a number, got {value.strip()!r}") from error
+        if boost <= 0 or math.isnan(boost) or math.isinf(boost):
+            raise ValueError(f"MEMORY_RECALL_INTENT_BOOSTS: {name} must be a finite number > 0, got {boost}")
+        boosts[name] = boost
+    return boosts
+
+
+def get_recall_intent_boosts() -> dict[str, float]:
+    """Intent multipliers from the environment; a malformed value is logged and ignored."""
+    raw = os.environ.get("MEMORY_RECALL_INTENT_BOOSTS", "")
+    cached = _intent_boosts_cache.get(raw)
+    if cached is None:
+        try:
+            cached = parse_intent_boosts(raw)
+        except ValueError as error:
+            import logging
+            logging.getLogger(__name__).warning("ignoring MEMORY_RECALL_INTENT_BOOSTS, using defaults",
+                                                extra={"error": str(error)})
+            cached = dict(DEFAULT_RECALL_INTENT_BOOSTS)
+        _intent_boosts_cache[raw] = cached
+    return dict(cached)
+
+
+def recall_type_boosts(intents: frozenset[str] | set[str]) -> dict[str, float]:
+    """Record type -> multiplier for the detected intents (the largest wins when two intents name a type)."""
+    if not intents:
+        return {}
+    boosts = get_recall_intent_boosts()
+    out: dict[str, float] = {}
+    for intent in sorted(intents):
+        boost = boosts.get(intent, 1.0)
+        if boost == 1.0:
+            continue
+        for ktype in RECALL_INTENT_TYPES.get(intent, ()):
+            out[ktype] = max(out.get(ktype, boost), boost)
+    return out
+
+
+# Compound queries ("X and Y", "X, also Y", "X и Y", "а также"): each part is
+# searched on its own and its best record is guaranteed a place in the top K.
+# On by default: no change on LoCoMo / LongMemEval-S questions, +4.4-4.6 points
+# of gold coverage@10 on compound pairs of LoCoMo questions
+# (docs/benchmarks/pmb-adoption-recall); ~20 ms on the queries it fires on.
+DEFAULT_RECALL_COMPOUND_SLOTS = True
+
+
+def get_recall_compound_slots() -> bool:
+    return _env_flag("MEMORY_RECALL_COMPOUND_SLOTS", DEFAULT_RECALL_COMPOUND_SLOTS)

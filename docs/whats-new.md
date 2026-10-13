@@ -4,6 +4,7 @@ Release summaries for the 14.x series, moved here from the README. The
 [CHANGELOG](../CHANGELOG.md) is the complete, authoritative record; this page
 keeps the measurements and usage notes that the summaries added.
 
+- [14.9.0](#version-1490--memory-through-the-hooks-rules-that-are-measured-a-warm-daemon)
 - [14.8.0](#version-1480--every-recall-tier-measured-two-of-them-fixed)
 - [14.7.0](#version-1470--whole-records-fill-the-context-budget)
 - [14.6.0](#version-1460--a-company-memory-server-you-can-run-dashboard-roles-onboarding-postgresql)
@@ -14,6 +15,54 @@ keeps the measurements and usage notes that the summaries added.
 - [14.2.0](#version-1420--facts-that-change-over-time)
 - [14.1.0](#version-1410--what-is-new)
 - [14.0.0](#version-1400--what-is-new)
+
+## Version 14.9.0 — memory through the hooks, rules that are measured, a warm daemon
+
+**Release date: 2026-10-13.** The Claude Code plugin (`total-agent-memory-plugin`) is not updated in
+this release and still pins 14.8.0; the hooks, tools and settings below come with an install from this
+repository or the package. The catalogue grows from 77 to 79 tools.
+
+**Ambient memory.** The hooks now recall, check rules and save without the agent calling a memory tool:
+every prompt gets the matching rules and a short block of relevant records (`TAM_AMBIENT_TOKEN_BUDGET`,
+400 tokens; `TAM_AMBIENT_LATENCY_MS`, 1500 ms), a Bash call or an edit that matches a rule gets a
+reminder first, every tool call lands in an action log, and at the end of a turn a broken "never X" is
+reported to the user. Docker installs get the same hooks. Settings: the ambient section of
+[configuration.md](configuration.md#ambient-memory-hooks).
+
+**Rules.** Loading rules no longer counts as firing them, which used to suspend helpful rules after ten
+session starts. A rule is now suspended only on explicit ratings (5 or more, 95% Wilson upper bound of the
+success rate below 0.4). `self_rules_context(query=...)` ranks rules for the task, and
+`self_rules(action='followed' | 'report')` records and measures whether they were followed.
+
+| Change | Before | 14.9.0 |
+|---|---:|---:|
+| First `memory_recall` of a session, `tam proxy` with the daemon running ([shared-daemon.md](shared-daemon.md)) | 1.51 s | **0.18 s** |
+| Search while another connection holds the write lock for 1 s ([details](benchmarks/pmb-adoption-recall/RESULTS.md#2-usage-statistics-off-the-read-path)) | 1,008-1,108 ms | **16-17 ms** |
+| "What was it before?" questions with the older value first ([details](benchmarks/pmb-adoption-recall/RESULTS.md#1-historical-value-questions)) | 0 / 48 | **48 / 48** |
+| LongMemEval-S, 400 held-out questions, gpt-4.1-mini reader ([details](benchmarks/longmemeval-v14-9/RESULTS.md)) | 87.75 (14.5.1) | **88.0** |
+
+The recall changes (historical values, intent-aware record types, compound-query slots, singleflight,
+cross-lingual full-text damping, an off-by-default `query_entity` tier) left LoCoMo and LongMemEval-S
+dev R@10 unchanged; the result cache, which never hit, now does.
+
+| Also new | How you use it |
+|---|---|
+| **Shared warm daemon** | `tam setup register --client claude-code --shared-daemon`; `tam daemon status`. |
+| **Smaller tool catalogues** | `TAM_TOOL_PROFILE=lean` (28 tools, about 4,400 tokens) or `minimal` (12, about 2,150) instead of about 15,200 for all 79 (`scripts/tool_catalogue_size.py`); hidden tools stay callable. |
+| **Usage instructions and tool statistics** | Sent on connect (`TAM_MCP_INSTRUCTIONS`); per-tool p50/p95 in `memory_perf_report` (`TAM_TOOL_TELEMETRY`). |
+| **Importers and encrypted bundles** | `tam import chatgpt\|claude\|mem0\|markdown <path>`, `tam export --encrypted`, `tam import-bundle` ([importing.md](importing.md)). |
+| **Exploration memos** | `memory_exploration_record` / `memory_exploration_recall`: codebase conclusions that go stale when their files change. |
+| **Relative dates in queries** | "last month", "three weeks ago" narrow the search; `memory_recall(as_of=...)` sets the moment they count from. |
+| **Write-path reliability** | Records saved without the embedder get vectors later; swallowed errors and the importance budget show in `memory_stats`; decisions, conventions and lessons no longer age out. |
+
+Fixed: hook text never reached the model on PreToolUse/PostToolUse (Claude Code ignores their plain
+stdout), nothing was restored after `/compact`, SessionEnd read no messages from current transcripts,
+image OCR on macOS returned nothing (`[ocr]` extra), a NUL in a query broke full-text search, and
+onnxruntime could abort the process at exit (its telemetry is now off, so no usage events are sent).
+CI now runs on every pull request: 3 OSes x 3 Pythons, ruff, CodeQL and the EN/RU/UK recall-quality
+gate (`scripts/check.sh` locally). Migrations 038-042 run on first start. Details:
+[CHANGELOG](../CHANGELOG.md).
+
 ## Version 14.8.0 — every recall tier measured, two of them fixed
 
 **Release date: 2026-10-08.** Nothing in the Claude Code plugin, the hooks, the skill or the 77 tool

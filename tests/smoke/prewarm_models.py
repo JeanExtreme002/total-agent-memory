@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path.cwd() / "src"))
 
 import config  # noqa: E402
 from fastembed import TextEmbedding  # noqa: E402
+from memory_core.fastembed_loader import load_model  # noqa: E402
 
 
 def main() -> int:
@@ -22,7 +23,7 @@ def main() -> int:
         return 2
     models = sorted({config.get_text_embed_model(), config.get_code_embed_model()} - {""})
     for name in models:
-        TextEmbedding(name)
+        load_model(TextEmbedding, name)
         print(f"cached {name} in {cache}")
     return 0
 

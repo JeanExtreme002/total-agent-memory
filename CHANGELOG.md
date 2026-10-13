@@ -6,6 +6,204 @@ and versions use [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [14.9.0] - 2026-10-13
+
+### Added
+
+- **Relative dates in a query resolve against a moment.** "What did I finish last month", "three weeks ago", "since I started two weeks ago", "yesterday", "recently" now give the temporal re-ranker a date window; before, only absolute dates ("March 2023") did, and such questions were ranked without their time cue. The window is counted back from now, or from the new optional `memory_recall(as_of=...)` (an ISO date or datetime) when the asking moment is not now, as in a benchmark or a replay. The window follows the unit: a day either way for days, three for weeks, a week for months; "since … ago" runs up to the anchor. The LongMemEval harnesses pass the question date as `as_of`. 47 of the 500 LongMemEval-S questions carry such a phrase; on the 95 dev questions with evidence the first gold record moved up (R@1 90.5 to 92.6, R@10 97.9 to 98.9; temporal-reasoning R@1 80.6 to 87.1, R@10 93.5 to 96.8) and nothing moved down.
+- `tam import chatgpt|claude|mem0|markdown <path>` imports ChatGPT and claude.ai data exports,
+  mem0 `get_all()` JSON and Markdown trees through the normal save path (redaction, dedup,
+  embedding), keeps original timestamps in `created_at`, imports user turns only unless
+  `--include-assistant` is given, streams large exports, and skips already-imported units
+  via the new `import_ledger` table. `--dry-run` counts without writing. See `docs/importing.md`.
+- `tam export --encrypted <out> [--project P]` and `tam import-bundle <file> [--mode merge|replace]`:
+  portable AES-256-GCM bundles (scrypt key) of an online-backup snapshot with a SHA-256
+  manifest. Import validates everything before touching the live store, refuses traversal,
+  links and unexpected members, keeps a safety backup on replace, and re-embeds when the
+  embedding model differs.
+- MCP tools `memory_exploration_record` / `memory_exploration_recall`: codebase conclusions
+  keyed to the SHA-256 of the files they were drawn from, recalled by question similarity
+  with a fresh/stale verdict per memo. The catalogue now has 79 tools.
+- **Ambient memory: memory works while the agent never calls a memory tool.** Hooks now do the
+  recall, the rule checking and the saving themselves (`src/ambient/`, see the ambient section of
+  `docs/configuration.md`):
+  - every prompt (UserPromptSubmit) gets the rules that match it and a short block of relevant
+    records as `additionalContext` — warm through the shared daemon's `/internal/hook/recall`,
+    FTS-only without it — inside a token budget (`TAM_AMBIENT_TOKEN_BUDGET`, 400) and a time limit
+    (`TAM_AMBIENT_LATENCY_MS`, 1500 ms), never repeating what the session already got and never
+    blocking the prompt;
+  - a prompt that corrects the agent ("I already told you…", "how many times", "я же говорил",
+    "сколько раз", an all-caps prompt) becomes a draft insight (`category='user_correction'`, tag
+    `draft`) that becomes promotable to a rule only after real upvotes; a similar correction in the
+    same project within 90 minutes raises the existing draft (`TAM_CORRECTION_CAPTURE`, default on);
+  - a new PreToolUse hook `rule-reminder.{sh,ps1}` shows a rule right before a Bash call or an edit
+    that matches it, first of all a prohibition the action seems to break;
+  - every tool call (and every failed one, via PostToolUseFailure) lands in the new agent action
+    log: tool, short redacted summary, exit status, project, session; bounded by
+    `TAM_ACTION_LOG_RETENTION_DAYS` (30) and 100 000 rows;
+  - at Stop the turn's actions are checked against the rules shown to the session: a broken "never
+    X" is reported to the user, and each new verdict lands in the rule's own heuristic counters
+    `auto_success_count` / `auto_fail_count`, shown wherever rules are listed. Explicit ratings,
+    `success_rate`, the new `rules.success_lower_bound` (95% Wilson lower bound of the explicit
+    ratings) and auto-suspension never see them. Showing a rule still never touches `fire_count`;
+  - turns that edited files or ran commands are saved as short auto-saved summaries
+    (`TAM_TURN_AUTOSAVE`, default on); `tam forget-auto [--project] [--include-actions]
+    [--dry-run]` hard-deletes them together with the SessionEnd auto-saves;
+  - `hooks/codex-notify.{sh,ps1}` now captures each finished Codex turn into the same log (and a
+    turn summary) instead of only showing a reminder;
+  - Docker installs (`install-docker.sh`) register the prompt, rule-reminder and action-log hooks
+    and prepare a `codex-notify.sh` launcher; with `TAM_DOCKER=1` the hooks run the ambient
+    commands inside the container (`docker exec -i tam-mcp python -m ambient ...`), whose volume
+    holds the store.
+  Hard erasure (`memory_delete(hard=true)`) also removes action-log rows quoting the record,
+  `memory_forget` prunes the log, `memory_export` includes it, and the encrypted full export carries
+  it in the snapshot. Eight new dashboard settings in the agent/storage groups (nine with `TAM_CORRECTION_CAPTURE`).
+- **A user's correction drafts a rule.** When a prompt corrects the agent ("I already told you…",
+  "how many times", "я же говорил", "сколько раз", profanity, a shouted prompt, or "again" plus a
+  negated action), the UserPromptSubmit hook stores a draft insight (`user_correction`, tags
+  `draft` / `user-correction`, low importance and confidence) through `src/correction_capture.py`.
+  It shows up in `self_insight(list)` and becomes promotable to a rule only after real upvotes; a
+  similar correction within 90 minutes raises the existing draft, and a resubmitted prompt counts once
+  per session. Works on native and Docker installs, with or without the shared daemon, inside the
+  prompt hook's time limit; `TAM_CORRECTION_CAPTURE=false` turns it off.
+- **Rules are shown for a task and checked against what the agent did.** `self_rules_context(query=...)`
+  ranks the active rules by the distinctive words they share with the task (weighted by priority, damped
+  for rules that keep being shown and never followed) and returns a `surface_id` with each one, recorded
+  in the new `rule_surfaces` table. `self_rules(action='followed', surface_id=..., followed=true|false|null)`
+  records whether it was followed, and `self_rules(action='report')` gives follow rates with 95% Wilson
+  intervals and Benjamini-Hochberg-corrected verdicts. The report only measures; it never changes a
+  rule's status.
+- **Shared warm daemon.** `tam daemon start|stop|status|restart` runs one warm TAM server per memory
+  directory, and clients launch `tam proxy`, which relays their stdio MCP traffic to it, starts it when
+  needed, and falls back to an in-process server when it cannot. First `memory_recall` of a session: 0.18 s
+  with the daemon running, 1.51 s for the direct stdio server. `tam setup register --shared-daemon`
+  writes the proxy entry into client configs. Settings `TAM_DAEMON_PORT`, `TAM_DAEMON_IDLE_EXIT_MIN`,
+  `TAM_DAEMON_START_TIMEOUT_SEC`, `TAM_DAEMON_STOP_TIMEOUT_SEC`. See `docs/shared-daemon.md`.
+- **Smaller tool catalogues.** `TAM_TOOL_PROFILE=lean` lists 28 everyday tools and `minimal` the 12 core
+  ones, both with one-line descriptions and without per-parameter descriptions; `full` (default) is
+  unchanged. A hidden tool still answers when called; an unknown profile stops the server at startup.
+  `scripts/tool_catalogue_size.py` prints the size of each catalogue: full 79 tools, about 15,200
+  tokens; `lean` about 4,400; `minimal` about 2,150 (bytes / 4).
+- **The server sends usage instructions on connect.** A short guide (read first, what to save and what
+  not to, the server start date for resolving relative dates) goes to the client in the MCP
+  `instructions` field; `TAM_MCP_INSTRUCTIONS=false` turns it off.
+- **Per-tool call statistics.** With `TAM_TOOL_TELEMETRY` (default on) every tool call adds a row to
+  `tool_calls`: tool, duration, outcome, error class and the byte sizes of arguments and result, never
+  their contents; rows are kept 7 days. `memory_perf_report` reports count, p50, p95 and error rate per
+  tool for the last 24 hours.
+- **Records saved while the embedder was down get their vectors later.** Such a record is committed
+  (full-text search finds it) and queued in `embedding_pending`; the queue is drained at server start and
+  by the reflection runner, with exponential backoff up to 6 h and a dead letter after 8 attempts.
+- **Swallowed write-path errors are journalled.** Best-effort failures that went only to stderr are kept
+  in `error_log` for 14 days, rate limited per component and error type; `memory_stats` reports the last
+  24 hours per component under `write_path`, together with the embedding queue, the outbox and the
+  importance budget.
+- **Importance budget per project and day.** Beyond `MEMORY_CRITICAL_DAILY_BUDGET` (5) `critical` saves
+  a day, further ones are stored as `high`, with an `importance_note` to the caller; conventions and
+  rules are exempt. `MEMORY_HIGH_DAILY_BUDGET` does the same for `high` (unlimited by default). Lowered saves are
+  logged in `importance_budget_log`.
+- **Predicate synonyms in the knowledge graph.** `vocabularies/predicate_aliases.txt` groups predicates
+  that state one relation (`city`, `current_city`, `location`, `живет_в` → `lives_in`), so a new object
+  under any form supersedes the current one under another. The stored predicate keeps the caller's
+  wording. Extra files: `MEMORY_PREDICATE_VOCAB_EXTRA`.
+- **"What was it before?" ranks the older value first.** Recall puts the newest of several values of
+  one statement first; a question about the earlier value (English and Russian: "previously", "used to",
+  "my old X", "раньше", "прежний", ...) now gets them oldest first. On
+  `benchmarks/historical_value_eval.py` such questions went from 0 of 48 to 48 of 48, with and without
+  the cross-encoder; questions about the current value stayed at 48 of 48.
+- **Intent-aware record types.** A question about a decision, a lesson or rule, or how something was
+  fixed multiplies the fused score of `decision`, `lesson`/`convention` or `solution` records by
+  `MEMORY_RECALL_INTENT_BOOSTS` (1.3 each; `1.0` switches an intent off).
+- **Compound queries keep each part.** "X; Y", "X? Y?", "X, also Y", "X, а также Y" and "X, and what ..."
+  are split, each part is searched on its own, and its best record is guaranteed a place in the top
+  results (`MEMORY_RECALL_COMPOUND_SLOTS`, on). On LoCoMo questions joined in pairs, coverage@10 rose
+  from 0.583 to 0.629 and from 0.593 to 0.637, at about 20 ms per split query.
+- **`query_entity` recall tier**, off by default (`MEMORY_RECALL_TIER_WEIGHTS=query_entity=0.3` switches
+  it on): matches the query's entities against graph nodes. On LoCoMo with a proxy entity graph it lost
+  0.1 to 0.4 points of held-out R@10.
+- **Identical concurrent recalls run once.** Concurrent searches with the same project, normalised
+  query, limit and options share one execution (`MEMORY_RECALL_SINGLEFLIGHT`, on); a waiter runs its own
+  search after `MEMORY_RECALL_SINGLEFLIGHT_WAIT_SECONDS` (30) or when the leader fails.
+- **Cross-lingual full-text damping.** When none of the query's content words occurs in the full-text
+  vocabulary (a question in one language over records in another), the full-text tier's weight is
+  multiplied by `MEMORY_RECALL_FTS_CROSSLINGUAL_DAMP` (0.3; `1.0` = off).
+- None of the six recall changes above moved LoCoMo (dev and held-out) or LongMemEval-S dev R@10 on the
+  free retrieval harness; every number is in `docs/benchmarks/pmb-adoption-recall/RESULTS.md`.
+- **LongMemEval-S held-out after the 14.8 retrieval work:** 88.0 on the 400 held-out questions (87.75 for
+  14.5.1, same reader gpt-4.1-mini, judge and settings). 42 of the 48 wrong answers had every gold
+  session in the reader's context. See `docs/benchmarks/longmemeval-v14-9/RESULTS.md`.
+- **CI on every pull request.** `.github/workflows/ci.yml`: ruff with a per-file ratchet, the test suite
+  on Ubuntu, macOS and Windows with Python 3.11, 3.12 and 3.13 (Windows not yet blocking), a coverage
+  floor of 59%, the recall-quality gate (EN/RU/UK, cross-lingual and temporal recall floors) and an
+  advisory pip-audit, all behind one `ci-green` check. `.github/workflows/codeql.yml` adds CodeQL.
+  `scripts/check.sh` runs the same lint, test selection and gate locally.
+- `tests/test_version_consistency.py` checks that every file carrying the release number agrees with
+  `pyproject.toml`, and a migration test fails when two SQLite migrations share a number prefix.
+- Migrations 038 (`rule_surfaces`, `rules.shown_count`), 039 (`write_intents.lease_until`,
+  `embedding_pending`, `error_log`, `importance_budget_log`), 040 (`agent_actions`,
+  `rules.success_lower_bound`, `rules.auto_success_count`, `rules.auto_fail_count`), 041 (`tool_calls`)
+  and 042 (`import_ledger`, `exploration_memos`, `exploration_memo_files`), with their PostgreSQL twins
+  `migrations/postgres/workspace/0002_rule_surfaces.sql` to `0006_agent_actions.sql`.
+
+### Changed
+
+- **Decisions, conventions and lessons no longer age out of recall.** Recency decay of these types stops
+  at 0.85 (`MEMORY_DECAY_EXEMPT_TYPES`, `MEMORY_DECAY_EXEMPT_FLOOR`); supersession, not age, retires them.
+  Before, a 90-day half-life left a year-old decision 6% of its score.
+- **Rule suspension rests on ratings only.** `success_rate` is now `success / (success + fail)`. A rule
+  is auto-suspended after at least 5 explicit ratings when the 95% Wilson upper bound of its success
+  rate is below 0.4; loads, fires and the heuristic verdicts of the ambient turn check never count.
+  Migration 038 moves historic `fire_count` values into `shown_count` and keeps `fire_count` at most
+  the number of ratings.
+- **Usage statistics are written off the read path.** `memory_recall` used to run an UPDATE and a COMMIT
+  per search to bump `recall_count`; the ids are now buffered and written in one transaction by a
+  background thread every `MEMORY_RECALL_TOUCH_FLUSH_MS` (250). A search while another connection held
+  the write lock for 1 s took 1,008-1,108 ms and now takes 16-17 ms. Buffered counts are written at exit,
+  including when a client stops the server with SIGTERM (the server turns it into a normal exit).
+- **Tool results are compact JSON** (no indentation), and recall hits drop fields whose value is null.
+- **Hooks share one runtime.** `hooks/lib/tam_hook.py` parses the hook payload once per call (no Python
+  start per field) and every bash and PowerShell hook resolves the memory directory the same way
+  (`CLAUDE_MEMORY_DIR`, `TAM_MEMORY_DIR`, `~/.tam`, then an unmigrated `~/.claude-memory`).
+  The installers ship the runtime and register `PostToolUseFailure`.
+- **onnxruntime sends no telemetry.** Its telemetry events are disabled before the first model loads.
+- `scripts/cm-import` is documented as legacy; `tam import markdown` is the supported path.
+
+### Fixed
+
+- **Loading rules suspended helpful ones.** `self_rules_context` bumped `fire_count` for every rule it
+  returned, while rating divided successes by `fire_count` and suspended a rule at 10 fires with a rate
+  below 0.2: ten session starts and one helpful rating suspended a good rule. Loading now counts in
+  `shown_count` only.
+- **Hook text did not reach the model.** Claude Code ignores plain stdout of PreToolUse, PostToolUse and
+  PostToolUseFailure; those hooks now answer with one `hookSpecificOutput.additionalContext` object. Stop
+  no longer prints text meant for the model, keeps one recovery file per session and shows its notice to
+  the user at most once.
+- **Nothing was restored after `/compact`.** SessionStart now also runs on `compact` and `resume` and
+  injects the latest session summary, next steps, pitfalls and top rules (bounded); a recovery file is
+  shown only for another session in the same directory.
+- **SessionEnd found no messages in current transcripts**, which nest the role and content under
+  `message`; both that format and the legacy flat one are parsed.
+- **The outbox could replay a write twice.** Pending intents are now leased atomically
+  (`write_intents.lease_until`, `MEMORY_OUTBOX_LEASE_SEC`), so two reconcilers never replay the same
+  one and a crashed reconciler's lease expires; an intent whose record was already inserted is closed
+  without a replay.
+- **The recall result cache never hit.** Entries were stored under a key without the tier weights and
+  looked up with one that had them. Lookup and store now share one key, which also covers the
+  cross-encoder's readiness and the ranking switches, and cached results are handed out as copies.
+- **A query containing a NUL character broke the full-text tier** (FTS5 reads NUL as end of input); it
+  is now removed from the query.
+- **The process could abort at exit on macOS** (`libc++abi: ... recursive_mutex lock failed`):
+  onnxruntime's telemetry upload thread outlived interpreter shutdown. Telemetry is now disabled before
+  the first model loads.
+- **Image OCR on macOS never returned text.** `src/ingestion/ocr.py` reached Apple Vision through pyobjc, which no install path declared, and when pyobjc was present every image still came back empty: the request handler was built with an options dict pyobjc 12 rejects (`key does not exist`), the result of `performRequests:error:` was unpacked as a tuple where pyobjc 12 returns a bool, and the recognition level was set to fast while the comment said accurate. All three are fixed, PDFs are now read by drawing the first page through Quartz (Vision does not take PDFs), and failures are logged instead of returning an unexplained empty string. pyobjc ships in the new macOS-only `[ocr]` extra (`requirements-ocr.txt` for clones). Reported in #36.
+- **`atomic_facts_backfill` stopped at the first record it could not extract.** A source over the extraction limit, a provider timeout or a malformed completion ended the whole sweep with a traceback. Such a record is now logged, counted and left pending for the next run; the result is `(processed, facts_created, skipped)`. Database errors still raise.
+
+### Security
+
+- **Hook payloads and install paths are quoted for the shell.** Payload fields reach the bash hooks as
+  `shlex`-quoted assignments, and the generated `install-env.sh` / `install-env.ps1` escape shell
+  metacharacters (`"`, `$`, `` ` ``, `'`) in the install and memory paths.
+
 ## [14.8.0] - 2026-10-08
 
 ### Added

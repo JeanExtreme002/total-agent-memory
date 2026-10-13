@@ -929,6 +929,131 @@
       "type": "object"
     }
   },
+  "memory_exploration_recall": {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "include_stale": {
+          "default": true,
+          "description": "Also return memos whose files changed since recording",
+          "title": "Include Stale",
+          "type": "boolean"
+        },
+        "limit": {
+          "default": 5,
+          "description": "Maximum memos returned",
+          "maximum": 50,
+          "minimum": 1,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "project": {
+          "description": "Project name",
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Project",
+          "type": "string"
+        },
+        "question": {
+          "description": "The question being asked now",
+          "maxLength": 2000,
+          "minLength": 1,
+          "title": "Question",
+          "type": "string"
+        },
+        "root": {
+          "anyOf": [
+            {
+              "maxLength": 1024,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Absolute project root to verify files against; default: the server's working directory",
+          "title": "Root"
+        }
+      },
+      "required": [
+        "question",
+        "project"
+      ],
+      "type": "object"
+    }
+  },
+  "memory_exploration_record": {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "conclusion": {
+          "description": "What was concluded, self-contained enough to reuse without re-reading",
+          "maxLength": 20000,
+          "minLength": 1,
+          "title": "Conclusion",
+          "type": "string"
+        },
+        "files": {
+          "description": "Files read to reach the conclusion: paths relative to root, or absolute paths inside root",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Files",
+          "type": "array"
+        },
+        "project": {
+          "description": "Project name",
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Project",
+          "type": "string"
+        },
+        "question": {
+          "description": "The question the exploration answered, e.g. 'how is auth wired?'",
+          "maxLength": 2000,
+          "minLength": 1,
+          "title": "Question",
+          "type": "string"
+        },
+        "root": {
+          "anyOf": [
+            {
+              "maxLength": 1024,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Absolute project root directory; default: the server's working directory",
+          "title": "Root"
+        }
+      },
+      "required": [
+        "question",
+        "conclusion",
+        "files",
+        "project"
+      ],
+      "type": "object"
+    }
+  },
   "memory_export": {
     "annotations": {
       "destructiveHint": false,
@@ -1265,6 +1390,10 @@
     },
     "inputSchema": {
       "properties": {
+        "as_of": {
+          "description": "ISO date or datetime that relative dates in the query ('last month', 'three weeks ago', 'yesterday') are counted from. Default: now.",
+          "type": "string"
+        },
         "branch": {
           "description": "Filter by git branch (also includes branch-agnostic records)",
           "type": "string"
@@ -2582,9 +2711,16 @@
             "suspend",
             "activate",
             "retire",
-            "add_manual"
+            "add_manual",
+            "followed",
+            "report"
           ],
           "type": "string"
+        },
+        "applicable": {
+          "default": true,
+          "description": "For followed: false marks the rule not applicable",
+          "type": "boolean"
         },
         "category": {
           "description": "Category (for add_manual)",
@@ -2594,9 +2730,27 @@
           "description": "Rule text (for add_manual)",
           "type": "string"
         },
+        "followed": {
+          "description": "For followed: true followed, false ignored, null clears",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "id": {
           "description": "Rule ID (for fire/rate/suspend/activate/retire)",
           "type": "integer"
+        },
+        "min_n": {
+          "default": 5,
+          "description": "For report: judged surfaces needed before a verdict",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "note": {
+          "default": "",
+          "description": "For followed: evidence note",
+          "type": "string"
         },
         "priority": {
           "default": 5,
@@ -2615,6 +2769,10 @@
         "success": {
           "description": "For rate: was rule helpful?",
           "type": "boolean"
+        },
+        "surface_id": {
+          "description": "For followed: surface_id returned by self_rules_context",
+          "type": "string"
         },
         "tags": {
           "items": {
@@ -2659,6 +2817,14 @@
         },
         "project": {
           "default": "general",
+          "type": "string"
+        },
+        "query": {
+          "description": "Optional task text: rank rules by relevance and return a surface_id per rule for self_rules(action='followed').",
+          "type": "string"
+        },
+        "session_id": {
+          "description": "Optional session for the surfaces (default: current).",
           "type": "string"
         }
       },

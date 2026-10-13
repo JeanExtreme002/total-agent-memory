@@ -159,6 +159,7 @@ def main() -> int:
 
     # Build embedder bound to Store (shares FastEmbed / Ollama)
     embedder = None
+    store = None
     try:
         import server as _srv
         _srv.MEMORY_DIR = memory_dir
@@ -185,9 +186,30 @@ def main() -> int:
     elapsed = round(time.time() - t0, 1)
     _log(f"done in {elapsed}s — {json.dumps(result, default=str)[:500]}")
     db.close()
+    _run_embedding_backfill(store)
     _run_consolidation_sweep(db_path, embedder)
     _release_lock(lock_path)
     return 0
+
+
+def _run_embedding_backfill(store) -> None:
+    """Embed records that were saved while the embedding provider was down.
+
+    Due rows of ``embedding_pending`` are retried with exponential backoff
+    (src/embedding_backfill.py); a failure ends the pass early so a provider
+    outage costs one timeout per reflection cycle, not one per record.
+    """
+    if store is None:
+        _log("embedding backfill skipped: no Store (embedder init failed)")
+        return
+    t0 = time.time()
+    try:
+        counts = store.drain_embedding_backfill()
+    except sqlite3.Error as error:
+        _log(f"embedding backfill failed: {error}")
+        store.error_journal.log_error("embedding_backfill.reflection", error, "embedding backfill failed")
+        return
+    _log(f"embedding backfill in {round(time.time() - t0, 1)}s — {json.dumps(counts)}")
 
 
 def _run_consolidation_sweep(db_path: Path, embedder) -> None:
