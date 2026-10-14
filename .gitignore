@@ -139,6 +139,20 @@ docs/benchmarks/aml-cycle2/*
 !docs/benchmarks/longmemeval-v2/
 !docs/benchmarks/context-fill-v14/
 !docs/benchmarks/context-fill-v14/raw/
+!docs/benchmarks/tier-ablation-v14/
+!docs/benchmarks/tier-ablation-v14/raw/
+!docs/benchmarks/longmemeval-v14-9/
+!docs/benchmarks/longmemeval-v14-9/raw/
+!docs/benchmarks/pmb-adoption-recall/
+!docs/benchmarks/pmb-adoption-recall/raw/
 
 # uv lockfile: dependencies live in pyproject.toml and requirements*.txt
 uv.lock
+
+# install-docker.sh generated hook launchers
+hooks/_docker-launchers/
+
+# pytest-cov data file (scripts/check.sh --coverage)
+.coverage
+.coverage.*
+coverage.xml
