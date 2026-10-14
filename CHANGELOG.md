@@ -133,7 +133,7 @@ and versions use [Semantic Versioning](https://semver.org/).
   14.5.1, same reader gpt-4.1-mini, judge and settings). 42 of the 48 wrong answers had every gold
   session in the reader's context. See `docs/benchmarks/longmemeval-v14-9/RESULTS.md`.
 - **CI on every pull request.** `.github/workflows/ci.yml`: ruff with a per-file ratchet, the test suite
-  on Ubuntu, macOS and Windows with Python 3.11, 3.12 and 3.13 (Windows not yet blocking), a coverage
+  on Ubuntu, macOS and Windows with Python 3.11, 3.12 and 3.13, all blocking, a coverage
   floor of 59%, the recall-quality gate (EN/RU/UK, cross-lingual and temporal recall floors) and an
   advisory pip-audit, all behind one `ci-green` check. `.github/workflows/codeql.yml` adds CodeQL.
   `scripts/check.sh` runs the same lint, test selection and gate locally.
