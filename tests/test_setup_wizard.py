@@ -568,3 +568,12 @@ def test_upgrade_points_at_plain_text_keys_and_reconfigure_moves_them(tmp_path, 
     assert code == 0, out
     assert SECRET not in (world.home / '.claude.json').read_text()
     assert saved_settings(world)['OPENAI_API_KEY'] == SECRET
+
+
+def test_codex_home_never_reaches_tests_or_their_subprocesses():
+    # Regression: run from inside Codex (which sets CODEX_HOME), the installer tests wrote a test's
+    # temporary memory directory into the developer's real ~/.codex/config.toml. conftest drops it.
+    assert 'CODEX_HOME' not in os.environ
+    child = subprocess.run([sys.executable, '-c', "import os; print(os.environ.get('CODEX_HOME', ''))"],
+                           capture_output=True, text=True, timeout=30, check=True)
+    assert child.stdout.strip() == ''
