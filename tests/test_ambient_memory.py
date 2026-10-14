@@ -949,6 +949,7 @@ def test_docker_mode_runs_the_ambient_commands_inside_the_container(mem, tmp_pat
 
 
 @needs_bash
+@needs_fake_docker
 def test_docker_mode_without_a_running_container_stays_silent(tmp_path):
     bin_dir = fake_bin(tmp_path, {"docker": "#!/usr/bin/env bash\necho 'No such container: tam-mcp' >&2\nexit 1\n"})
     mem = tmp_path / "mem"
