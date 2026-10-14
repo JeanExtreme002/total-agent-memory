@@ -202,7 +202,8 @@ def test_ctrl_c_during_apply_waits_for_a_complete_write(tmp_path, monkeypatch):
     def interrupted_write(change):
         calls.append(change.path)
         if len(calls) == 1:
-            os.kill(os.getpid(), signal.SIGINT)
+            # raise_signal runs the installed handler; on Windows os.kill(own pid) terminates the process.
+            signal.raise_signal(signal.SIGINT)
         real_write(change)
 
     monkeypatch.setattr(clients, 'write', interrupted_write)

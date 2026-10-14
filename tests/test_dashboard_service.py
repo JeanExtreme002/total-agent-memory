@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -137,7 +138,16 @@ def _dashboard_output(log_dir: Path) -> str:
     return "\n".join(parts)
 
 
-def _wait_until_live(port: int, log_dir: Path, timeout: float = DASHBOARD_READY_TIMEOUT) -> dict:
+def _listeners(port: int) -> str:
+    lsof = shutil.which("lsof")
+    if lsof is None:
+        return "<lsof not available>"
+    result = subprocess.run([lsof, "-nP", f"-iTCP:{port}"], capture_output=True, text=True, timeout=10)
+    return result.stdout or "<nothing on the port>"
+
+
+def _wait_until_live(port: int, log_dir: Path, pid_path: Path,
+                     timeout: float = DASHBOARD_READY_TIMEOUT) -> dict:
     """Poll the liveness probe (no subprocess, no DB) until the dashboard answers."""
     deadline = time.monotonic() + timeout
     last_error: Exception | None = None
@@ -147,8 +157,14 @@ def _wait_until_live(port: int, log_dir: Path, timeout: float = DASHBOARD_READY_
         except OSError as exc:
             last_error = exc
             time.sleep(0.1)
+    listeners = _listeners(port)
+    if pid_path.exists():
+        # PYTHONFAULTHANDLER makes the stuck dashboard print every thread's stack to dashboard.err.
+        os.kill(int(pid_path.read_text(encoding="utf-8").strip()), signal.SIGABRT)
+        time.sleep(1)
     raise AssertionError(
-        f"dashboard never became ready on port {port}: {last_error}\n{_dashboard_output(log_dir)}")
+        f"dashboard never became ready on port {port}: {last_error}\n--- listeners ---\n{listeners}\n"
+        f"{_dashboard_output(log_dir)}")
 
 
 def test_fallback_install_is_idempotent_and_writes_profile_hook(tmp_path):
@@ -198,11 +214,13 @@ def test_fallback_install_starts_dashboard_and_serves_status(tmp_path):
     except RuntimeError as exc:
         pytest.skip(str(exc))
     env["DASHBOARD_PORT"] = str(port)
+    env["PYTHONUNBUFFERED"] = "1"
+    env["PYTHONFAULTHANDLER"] = "1"
 
     try:
         _run_helper("install", str(wrapper), str(ROOT), str(memory_dir), env=env)
         log_dir = memory_dir / "logs"
-        health = _wait_until_live(port, log_dir)
+        health = _wait_until_live(port, log_dir, pid_path)
         assert health["db_path"] == str(memory_dir / "memory.db")
 
         status = _get_json(port, "/status", timeout=STATUS_REQUEST_TIMEOUT)
