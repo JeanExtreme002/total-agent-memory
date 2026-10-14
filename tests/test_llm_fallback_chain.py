@@ -25,6 +25,8 @@ def _clean(monkeypatch):
 
 def _availability(monkeypatch, table: dict[str, bool]) -> None:
     monkeypatch.setattr(config, "provider_is_available", lambda name: table.get(name, False))
+    # has_llm probes Ollama over HTTP itself; a real Ollama on the machine must not answer for the table.
+    monkeypatch.setattr(config, "detect_ollama", lambda: table.get("ollama", False))
 
 
 def test_no_fallbacks_means_the_configured_provider_without_any_probe(monkeypatch):

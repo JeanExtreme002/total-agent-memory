@@ -76,6 +76,7 @@ def test_parse_env_file_without_key_returns_none():
     assert bp.parse_env_file("OTHER=1\nOPENAI_API_KEY=\n") is None
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="NTFS has no group/other mode bits")
 def test_load_api_key_refuses_group_readable_file(tmp_path):
     key_file = tmp_path / "openai.env"
     key_file.write_text("OPENAI_API_KEY=sk-abc\n")
@@ -83,6 +84,14 @@ def test_load_api_key_refuses_group_readable_file(tmp_path):
     with pytest.raises(bp.BudgetError, match="chmod 600"):
         bp.load_api_key(key_file, {})
     os.chmod(key_file, 0o600)
+    assert bp.load_api_key(key_file, {}) == ("sk-abc", f"file:{key_file}")
+
+
+def test_load_api_key_skips_the_mode_check_without_posix_modes(tmp_path, monkeypatch):
+    key_file = tmp_path / "openai.env"
+    key_file.write_text("OPENAI_API_KEY=sk-abc\n")
+    os.chmod(key_file, 0o644)
+    monkeypatch.setattr(bp, "POSIX_MODES", False)
     assert bp.load_api_key(key_file, {}) == ("sk-abc", f"file:{key_file}")
 
 
@@ -304,3 +313,31 @@ def test_run_guarded_refuses_default_key_with_foreign_upstream(tmp_path):
          "--allow-model", "gpt-5.2", "--out-dir", str(tmp_path / "run"), "--upstream", "http://127.0.0.1:9/v1",
          "--", sys.executable, "-c", "pass"], capture_output=True, text=True, timeout=60, check=False)
     assert done.returncode == 2 and "explicit --key-file" in done.stderr
+
+
+def test_stop_group_on_windows_breaks_then_kills_the_tree(monkeypatch):
+    # Regression: stop_group called os.killpg, which Windows lacks, so a budget trip crashed the guard
+    # instead of stopping the harness.
+    import signal
+
+    from tam_bench_common import run_guarded as rg
+
+    sent, ran = [], []
+
+    class Child:
+        pid = 4242
+
+        def send_signal(self, signum):
+            sent.append(signum)
+
+        def wait(self, timeout=None):
+            if timeout is not None:
+                raise subprocess.TimeoutExpired("harness", timeout)
+            return 1
+
+    monkeypatch.setattr(rg, "WINDOWS", True)
+    monkeypatch.setattr(signal, "CTRL_BREAK_EVENT", 1, raising=False)
+    monkeypatch.setattr(rg.subprocess, "run", lambda command, **kwargs: ran.append(command))
+    rg.stop_group(Child(), grace_s=0.01)
+    assert sent == [signal.CTRL_BREAK_EVENT]
+    assert ran == [["taskkill", "/T", "/F", "/PID", "4242"]]

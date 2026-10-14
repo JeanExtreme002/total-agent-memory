@@ -80,6 +80,96 @@ def shared_entity_neighbours(store, seed_ids, seed_scores, *, limit):
                     key=lambda item: (-item[1], item[0]))
     return ranked[:limit]
 
+# Query-entity tier: at most this many name variants are looked up, and at most
+# QUERY_ENTITY_MAX_NODES matched nodes (the most specific first) are expanded.
+QUERY_ENTITY_MAX_NAMES = 64
+QUERY_ENTITY_MAX_NODES = 16
+QUERY_ENTITY_MIN_NAME_CHARS = 3
+# Each further matched entity linked to the same record adds this share of the score.
+QUERY_ENTITY_MULTI_BONUS = 0.5
+# IDF = 1 / ln(QUERY_ENTITY_IDF_OFFSET + mentions); 2 keeps a single mention below 1 / ln(2).
+QUERY_ENTITY_IDF_OFFSET = 2.0
+
+
+def query_entity_names(query: str) -> list[str]:
+    """Name variants of the query's possible entities, for an exact `graph_nodes.name` lookup.
+
+    Capitalised / identifier-shaped tokens (query_router.extract_entity_candidates),
+    the query's content words and adjacent word pairs, each as typed, lower
+    case and capitalised (graph names are stored in either form).
+    """
+    from memory_core.query_terms import lexical_terms
+    from query_router import extract_entity_candidates
+
+    words = [term for term in lexical_terms(query) if len(term) >= QUERY_ENTITY_MIN_NAME_CHARS]
+    phrases = [*extract_entity_candidates(query), *words,
+               *(f"{first} {second}" for first, second in zip(words, words[1:]))]
+    names: dict[str, None] = {}
+    for phrase in phrases:
+        for variant in (phrase, phrase.lower(), phrase[:1].upper() + phrase[1:].lower()):
+            if len(variant) >= QUERY_ENTITY_MIN_NAME_CHARS:
+                names.setdefault(variant, None)
+    return list(names)[:QUERY_ENTITY_MAX_NAMES]
+
+
+def query_entity_candidates(store, query, *, project, ktype, branch, limit):
+    """Records linked to graph entities named in the query, as (knowledge_id, score) pairs.
+
+    Each matched entity node (not a hub type, linked to at most
+    MEMORY_GRAPH_HUB_DEGREE records) weighs IDF = 1 / ln(2 + mentions), where
+    mentions is the number of records linked to it. A record's weight is the
+    sum of the IDFs of the matched entities it is linked to, times
+    1 + 0.5 x (N - 1) for N such entities, so a record naming two of the
+    query's entities outranks one naming a single entity. Score =
+    weight / (1 + weight), in (0, 1).
+    """
+    names = query_entity_names(query)
+    if not names:
+        return []
+    from config import get_graph_hub_degree
+    hub_degree = get_graph_hub_degree()
+    nodes = [row[0] for row in store.db.execute(f"""
+        SELECT id FROM graph_nodes
+        WHERE name IN ({",".join("?" * len(names))})
+          AND type NOT IN ({",".join("?" * len(GRAPH_HUB_TYPES))})
+          AND COALESCE(status, 'active') = 'active'
+    """, [*names, *GRAPH_HUB_TYPES]).fetchall()]
+    if not nodes:
+        return []
+    mentions = dict(store.db.execute(f"""
+        SELECT node_id, COUNT(*) FROM knowledge_nodes WHERE node_id IN ({",".join("?" * len(nodes))})
+        GROUP BY node_id
+    """, nodes).fetchall())
+    kept = sorted((node for node in dict.fromkeys(nodes) if 1 <= mentions.get(node, 0) <= hub_degree),
+                  key=lambda node: (mentions[node], node))[:QUERY_ENTITY_MAX_NODES]
+    if not kept:
+        return []
+    idf = {node: 1.0 / math.log(QUERY_ENTITY_IDF_OFFSET + mentions[node]) for node in kept}
+    conds, params = ["k.status='active'"], []
+    if project:
+        conds.append("k.project=?")
+        params.append(project)
+    if ktype != "all":
+        conds.append("k.type=?")
+        params.append(ktype)
+    if branch:
+        conds.append("(k.branch=? OR k.branch='')")
+        params.append(branch)
+    linked: dict[int, set[str]] = {}
+    for row in store.db.execute(f"""
+        SELECT DISTINCT kn.knowledge_id, kn.node_id FROM knowledge_nodes kn JOIN knowledge k ON k.id = kn.knowledge_id
+        WHERE kn.node_id IN ({",".join("?" * len(kept))}) AND {" AND ".join(conds)}
+    """, [*kept, *params]).fetchall():
+        linked.setdefault(int(row[0]), set()).add(row[1])
+    scored = []
+    for kid, entity_nodes in linked.items():
+        weight = sum(idf[node] for node in entity_nodes) * (1.0 + QUERY_ENTITY_MULTI_BONUS * (len(entity_nodes) - 1))
+        scored.append((kid, weight / (1.0 + weight)))
+    # Ties: the newer record first.
+    scored.sort(key=lambda item: (-item[1], -item[0]))
+    return scored[:limit]
+
+
 def lexical_candidates(store, text, *, project, ktype, branch, limit):
     """Top `limit` FTS matches of `text` as (knowledge_id, normalised bm25) pairs."""
     from memory_core.fts_schema import SCOPED_BM25_WEIGHTS, scoped_match
@@ -141,3 +231,47 @@ def multi_query_candidates(store, parts, *, fuse, project, ktype, branch, limit,
         return []
     fused = fuse(rankings, {name: 1.0 for name in rankings}, RRF_K)
     return sorted(fused.items(), key=lambda item: (-item[1], item[0]))[:limit * 2]
+
+
+# Candidates per tier and part when looking for each compound part's best record.
+COMPOUND_PART_POOL = 10
+
+
+def compound_part_winners(store, parts, *, fuse, project, ktype, branch, can_embed, spaces):
+    """The best record of each part of a compound query (FTS + semantic fused per part), in part order.
+
+    A part with no candidate is skipped; a record that wins two parts is listed once.
+    """
+    winners: list[int] = []
+    for part in parts:
+        ranked = multi_query_candidates(store, [part], fuse=fuse, project=project, ktype=ktype, branch=branch,
+                                        limit=COMPOUND_PART_POOL, can_embed=can_embed, spaces=spaces)
+        if ranked and ranked[0][0] not in winners:
+            winners.append(int(ranked[0][0]))
+    return winners
+
+
+def guarantee_slots(ranked: list[int], winners: list[int], k: int) -> list[int]:
+    """`ranked` ids with every winner inside the first `k`.
+
+    A winner already in the top `k` stays where it is. Missing winners take
+    the bottom places of the top `k`, in part order, displacing the
+    lowest-ranked non-winners, which move just below the top `k` in their
+    order. Ids are unique in the result.
+    """
+    if k <= 0 or not winners:
+        return list(ranked)
+    head = list(ranked[:k])
+    winner_set = set(winners)
+    missing = [kid for kid in winners if kid not in head]
+    if not missing:
+        return list(ranked)
+    free = max(0, len(head) + len(missing) - k)
+    non_winner_places = [index for index in range(len(head)) if head[index] not in winner_set]
+    freed = set(non_winner_places[len(non_winner_places) - min(free, len(non_winner_places)):]) if free else set()
+    kept = [kid for index, kid in enumerate(head) if index not in freed]
+    displaced = [head[index] for index in sorted(freed)]
+    new_head = (kept + missing)[:k]
+    placed = set(new_head)
+    tail = [kid for kid in ranked[k:] if kid not in placed]
+    return new_head + displaced + tail
