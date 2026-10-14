@@ -323,3 +323,36 @@ def test_sigterm_still_flushes_buffered_usage(db_file):
     assert completed.returncode == 128 + signal.SIGTERM, completed.stderr
     counts = _counts(db_file)
     assert counts[1][0] == 1 and counts[2][0] == 1 and counts[3][0] == 0
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
+def test_sigterm_reaches_the_event_loop_as_a_callback():
+    # Regression: the plain handler raised inside anyio's task bookkeeping now and
+    # then; the task group broke, the main task never finished and the server hung
+    # (1 in 12 stdio exits on macOS). Inside the loop SIGTERM must be a loop callback.
+    script = textwrap.dedent(f"""
+        import asyncio, os, signal, sys
+        sys.path.insert(0, {str(SRC)!r})
+        import server
+        server._flush_on_sigterm()
+        seen = {{}}
+
+        async def finishes():
+            seen["plain_handler_inside_loop"] = signal.getsignal(signal.SIGTERM) is server._exit_on_sigterm
+
+        asyncio.run(server._with_sigterm_in_loop(finishes()))
+        assert seen["plain_handler_inside_loop"] is False, "SIGTERM still raises at any bytecode in the loop"
+        assert signal.getsignal(signal.SIGTERM) is server._exit_on_sigterm, "handler not restored after the loop"
+
+        async def killed():
+            os.kill(os.getpid(), signal.SIGTERM)
+            await asyncio.sleep(30)
+
+        try:
+            asyncio.run(server._with_sigterm_in_loop(killed()))
+        except server._Terminated as stop:
+            sys.exit(stop.code)
+        sys.exit(1)
+    """)
+    completed = subprocess.run([sys.executable, "-c", script], timeout=60, capture_output=True, text=True)
+    assert completed.returncode == 128 + signal.SIGTERM, completed.stderr

@@ -112,13 +112,19 @@ def test_detect_curly_apostrophe():
     assert cc.detect("I’ve already told you twice") is not None
 
 
+# Guards against catastrophic regex backtracking (seconds per call), not against
+# runner speed: a typical call takes well under a millisecond, and a loaded CI
+# runner must not turn that into a failure.
+DETECT_BUDGET_SECONDS = 0.02
+
+
 def test_detect_is_fast():
     text = "Please refactor the parser and keep the public API stable. " * 200
     rounds = 200
     started = time.perf_counter()
     for _ in range(rounds):
         cc.detect(text)
-    assert (time.perf_counter() - started) / rounds < 0.001
+    assert (time.perf_counter() - started) / rounds < DETECT_BUDGET_SECONDS
 
 
 # ── capture ──────────────────────────────────────────────────────────────

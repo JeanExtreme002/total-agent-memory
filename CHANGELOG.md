@@ -159,7 +159,8 @@ and versions use [Semantic Versioning](https://semver.org/).
   per search to bump `recall_count`; the ids are now buffered and written in one transaction by a
   background thread every `MEMORY_RECALL_TOUCH_FLUSH_MS` (250). A search while another connection held
   the write lock for 1 s took 1,008-1,108 ms and now takes 16-17 ms. Buffered counts are written at exit,
-  including when a client stops the server with SIGTERM (the server turns it into a normal exit).
+  including when a client stops the server with SIGTERM: the server runs its exit hooks and leaves at
+  once, even while the client still holds stdin open.
 - **Tool results are compact JSON** (no indentation), and recall hits drop fields whose value is null.
 - **Hooks share one runtime.** `hooks/lib/tam_hook.py` parses the hook payload once per call (no Python
   start per field) and every bash and PowerShell hook resolves the memory directory the same way
@@ -195,6 +196,10 @@ and versions use [Semantic Versioning](https://semver.org/).
 - **The process could abort at exit on macOS** (`libc++abi: ... recursive_mutex lock failed`):
   onnxruntime's telemetry upload thread outlived interpreter shutdown. Telemetry is now disabled before
   the first model loads.
+- **The stdio server could abort at exit on Linux with Python 3.11 and 3.12** (`terminate called
+  without an active exception`, exit -6) when the client closed it while the cross-encoder, the
+  embedding backfill or the enrichment worker was still inside onnxruntime. The interpreter ended that
+  thread through onnxruntime's C++ frames. Exit now waits up to 10 s for such threads first.
 - **Image OCR on macOS never returned text.** `src/ingestion/ocr.py` reached Apple Vision through pyobjc, which no install path declared, and when pyobjc was present every image still came back empty: the request handler was built with an options dict pyobjc 12 rejects (`key does not exist`), the result of `performRequests:error:` was unpacked as a tuple where pyobjc 12 returns a bool, and the recognition level was set to fast while the comment said accurate. All three are fixed, PDFs are now read by drawing the first page through Quartz (Vision does not take PDFs), and failures are logged instead of returning an unexplained empty string. pyobjc ships in the new macOS-only `[ocr]` extra (`requirements-ocr.txt` for clones). Reported in #36.
 - **`atomic_facts_backfill` stopped at the first record it could not extract.** A source over the extraction limit, a provider timeout or a malformed completion ended the whole sweep with a traceback. Such a record is now logged, counted and left pending for the next run; the result is `(processed, facts_created, skipped)`. Database errors still raise.
 

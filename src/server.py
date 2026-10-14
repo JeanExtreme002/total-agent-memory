@@ -16,6 +16,7 @@ Features: BM25 scoring, 3-level progressive disclosure, decay scoring, fuzzy sea
 """
 
 import asyncio
+import atexit
 import json
 import logging
 import math
@@ -1124,6 +1125,7 @@ class Store:
         import threading
 
         from embedding_backfill import STARTUP_DRAIN_LIMIT
+        from memory_core.exit_join import join_at_exit
         try:
             due = self._embedding_backfill().counts()["due"]
         except sqlite3.Error as exc:
@@ -1153,6 +1155,7 @@ class Store:
 
         thread = threading.Thread(target=_run, name="tam-embedding-backfill", daemon=True)
         thread.start()
+        join_at_exit(thread)  # it embeds through onnxruntime; see memory_core/exit_join.py
         return thread
 
     def _search_spaces(self, query, *, project=None, spaces=None, limit=10, kind="all", branch=None):
@@ -8735,8 +8738,64 @@ def _check_tool_profile() -> None:
         LOG(f"Tool profile: {profile.name} ({len(profile.tools)} tools listed; the rest stay callable)")
 
 
+class _Terminated(SystemExit):
+    """Raised by the SIGTERM handler so the stack unwinds and held locks are released."""
+
+
 def _exit_on_sigterm(signum, frame) -> None:
-    raise SystemExit(128 + signum)
+    raise _Terminated(128 + signum)
+
+
+def _exit_on_sigterm_in_loop() -> None:
+    raise _Terminated(128 + signal.SIGTERM)
+
+
+async def _with_sigterm_in_loop(coro):
+    """Await ``coro`` with SIGTERM delivered as an event-loop callback.
+
+    A plain signal handler raises between any two bytecodes, also inside anyio's
+    task bookkeeping; the exception then corrupts the task group, the main task
+    never finishes, and the server hangs instead of exiting. The loop runs signal
+    callbacks between tasks and lets SystemExit out of run_forever.
+    """
+    if signal.getsignal(signal.SIGTERM) is not _exit_on_sigterm:
+        return await coro
+    loop = asyncio.get_running_loop()
+    try:
+        loop.add_signal_handler(signal.SIGTERM, _exit_on_sigterm_in_loop)
+    except (NotImplementedError, RuntimeError):
+        return await coro  # no loop signal support (Windows); the plain handler stays
+    try:
+        return await coro
+    finally:
+        loop.remove_signal_handler(signal.SIGTERM)
+        signal.signal(signal.SIGTERM, _exit_on_sigterm)
+
+
+def _run_until_terminated(coro) -> None:
+    """asyncio.run that, after SIGTERM, exits without joining threads stuck in blocking I/O.
+
+    The stdio transport reads stdin on a non-daemon anyio worker thread. While the
+    client keeps its end of the pipe open that read never returns, and interpreter
+    shutdown would join the thread forever, so SIGTERM would not stop the server.
+    Exit hooks run first, so buffered recall usage and tool telemetry still land.
+    """
+    try:
+        asyncio.run(_with_sigterm_in_loop(coro))
+    except _Terminated as stop:
+        # CPython's own exit-hook runner (3.11+); without it, flush what we buffer.
+        run_exit_hooks = getattr(atexit, "_run_exitfuncs", None)
+        if run_exit_hooks is not None:
+            run_exit_hooks()
+        else:
+            from memory_core import recall_touch
+            recall_touch.close_all()
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.flush()
+            except (OSError, ValueError):
+                pass  # the client already closed the pipe; nothing left to deliver
+        os._exit(stop.code)
 
 
 def _flush_on_sigterm() -> None:
@@ -8756,12 +8815,13 @@ def run() -> None:
     listen_fd = os.environ.get(HTTP_LISTEN_FD_ENV)
     if listen_fd:
         _flush_on_sigterm()
-        asyncio.run(_http_worker(*_http_address(), socket.socket(fileno=int(listen_fd)), _hold_init_lock()))
+        _run_until_terminated(_http_worker(*_http_address(), socket.socket(fileno=int(listen_fd)),
+                                           _hold_init_lock()))
     elif _transport() in HTTP_TRANSPORTS and _http_workers() > 1:
         _serve_http_workers(*_http_address(), _http_workers())
     else:
         _flush_on_sigterm()
-        asyncio.run(main())
+        _run_until_terminated(main())
 
 
 if __name__ == "__main__":

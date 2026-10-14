@@ -1,8 +1,10 @@
-"""Download the default embedding models into FASTEMBED_CACHE_PATH.
+"""Download the default embedding and cross-encoder models into FASTEMBED_CACHE_PATH.
 
 The test suite blocks network access inside the fast hot path, so the default
-text and code models must already be cached before pytest starts. Run from a
-source checkout or an unpacked source distribution.
+text and code models must already be cached before pytest starts. The
+cross-encoder is cached too, so the exit-during-model-load regression
+(tests/test_exit_join.py) runs instead of skipping. Run from a source checkout
+or an unpacked source distribution.
 """
 
 import os
@@ -13,6 +15,7 @@ sys.path.insert(0, str(Path.cwd() / "src"))
 
 import config  # noqa: E402
 from fastembed import TextEmbedding  # noqa: E402
+from fastembed.rerank.cross_encoder import TextCrossEncoder  # noqa: E402
 from memory_core.fastembed_loader import load_model  # noqa: E402
 
 
@@ -25,6 +28,9 @@ def main() -> int:
     for name in models:
         load_model(TextEmbedding, name)
         print(f"cached {name} in {cache}")
+    reranker = config.get_cross_rerank_model()
+    load_model(TextCrossEncoder, reranker)
+    print(f"cached {reranker} in {cache}")
     return 0
 
 

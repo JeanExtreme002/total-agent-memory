@@ -156,7 +156,7 @@ python3 -m venv .venv
 .venv/bin/pip install -e . -r requirements-dev.txt
 
 export FASTEMBED_CACHE_PATH="$PWD/.tam-models" TAM_MEMORY_DIR="$PWD/.tam-test-memory"
-.venv/bin/python tests/smoke/prewarm_models.py   # downloads the text and code embedding models (~850 MB) once
+.venv/bin/python tests/smoke/prewarm_models.py   # downloads the text and code embedding models and the cross-encoder (~940 MB) once
 .venv/bin/python -m pytest tests -q
 ```
 

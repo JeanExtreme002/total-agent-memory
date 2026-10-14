@@ -148,8 +148,11 @@ class DaemonState:
     def start_bootstrap(self) -> None:
         self.loop = asyncio.get_running_loop()
         self.ready_event = asyncio.Event()
+        from memory_core.exit_join import join_at_exit
+
         self.bootstrap_thread = threading.Thread(target=self._bootstrap, name="tam-daemon-bootstrap", daemon=True)
         self.bootstrap_thread.start()
+        join_at_exit(self.bootstrap_thread, FLUSH_JOIN_TIMEOUT_SEC)  # prewarm runs onnxruntime
 
     def _notify_loop(self, callback: Callable[[], None]) -> None:
         loop = self.loop

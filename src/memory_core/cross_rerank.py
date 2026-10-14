@@ -25,6 +25,7 @@ import time
 import unicodedata
 from collections.abc import Callable, Sequence
 
+from memory_core.exit_join import join_at_exit
 from memory_core.telemetry import counters, op_timer
 
 LOGGER = logging.getLogger(__name__)
@@ -78,7 +79,9 @@ class CrossReranker:
             if self._started:
                 return
             self._started = True
-        threading.Thread(target=self._load, name="cross-rerank-load", daemon=True).start()
+        thread = threading.Thread(target=self._load, name="cross-rerank-load", daemon=True)
+        thread.start()
+        join_at_exit(thread)
 
     def _load(self) -> None:
         started = time.perf_counter()
