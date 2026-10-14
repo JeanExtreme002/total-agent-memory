@@ -19,12 +19,13 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shlex
 import shutil
 import sqlite3
 import subprocess
 import sys
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import ModuleType
 
 import pytest
@@ -526,33 +527,36 @@ def test_installer_registers_failure_event_and_ships_runtime(tmp_path):
     plan = extras.plan_hooks(ROOT, host, memory_dir=tmp_path / "m")
     settings = json.loads(plan.text)["hooks"]
     failure = [h["command"] for b in settings["PostToolUseFailure"] for h in b["hooks"]]
-    assert any(c.endswith("memory-trigger.sh") for c in failure)
-    assert any(c.endswith("on-bash-error.sh") for c in failure)
+    scripts = [shlex.split(c) for c in failure]
+    assert all(len(words) == 1 for words in scripts), "each command is one shell word"
+    assert any(words[0].endswith("memory-trigger.sh") for words in scripts)
+    assert any(words[0].endswith("on-bash-error.sh") for words in scripts)
     assert all(b.get("matcher", "") == "" for b in settings["SessionStart"]), "empty matcher covers compact"
     runtime = {dest.name for _src, dest in plan.runtime}
     assert {"common.sh", "memory-nudge.sh", "tam_hook.py"} <= runtime
     (env_path, env_text), = plan.generated
     assert env_path.name == "install-env.sh"
-    assert f'"${{CLAUDE_MEMORY_INSTALL_DIR:={ROOT}}}"' in env_text
+    escaped_root = str(ROOT).replace("\\", "\\\\")
+    assert f'"${{CLAUDE_MEMORY_INSTALL_DIR:={escaped_root}}}"' in env_text
 
 
 def test_windows_install_env_and_runtime(tmp_path):
     from setup_wizard import clients, extras
 
     host = clients.Host(tmp_path, "Windows", {"APPDATA": str(tmp_path)}, lambda _b: None)
-    plan = extras.plan_hooks(ROOT, host, memory_dir=Path("C:/Users/o'brien/.tam"))
+    plan = extras.plan_hooks(ROOT, host, memory_dir=PureWindowsPath("C:/Users/o'brien/.tam"))
     runtime = {dest.name for _src, dest in plan.runtime}
     assert {"common.ps1", "tam_hook.py"} <= runtime and "common.sh" not in runtime
     (env_path, env_text), = plan.generated
     assert env_path.name == "install-env.ps1"
-    assert "$env:TAM_MEMORY_DIR = 'C:/Users/o''brien/.tam'" in env_text
+    assert "$env:TAM_MEMORY_DIR = 'C:\\Users\\o''brien\\.tam'" in env_text
 
 
 def test_install_env_quotes_shell_metacharacters():
     from setup_wizard import clients, extras
 
     host = clients.Host(Path("/h"), "Linux", {}, lambda _b: None)
-    text = extras.install_env_text(host, Path('/opt/a"b$c`d'), None)
+    text = extras.install_env_text(host, PurePosixPath('/opt/a"b$c`d'), None)
     assert ': "${CLAUDE_MEMORY_INSTALL_DIR:=/opt/a\\"b\\$c\\`d}"' in text
     assert "TAM_MEMORY_DIR" not in text
 

@@ -101,7 +101,8 @@ class Harness:
             return
         record = registry.read_record(self.paths)
         if record is not None:
-            os.kill(record.pid, signal.SIGKILL)
+            # Windows has no SIGKILL; os.kill there is TerminateProcess for any signal.
+            os.kill(record.pid, getattr(signal, "SIGKILL", signal.SIGTERM))
             self.wait_stopped(10)
 
     def proxy_params(self, entry: Path = ENTRY):
@@ -435,6 +436,18 @@ def test_proxy_end_to_end_starts_daemon_and_relays(harness):
             assert structured is None or structured == json.loads(saved.content[0].text)
             missing = await session.call_tool("no_such_tool", {})
             assert missing.is_error and "Unknown tool" in missing.content[0].text
+            status = harness.status()
+            assert status["running"] and status["version"] == VERSION
+
+    asyncio.run(scenario())
+
+
+# mcp's stdio_client runs the proxy in a kill-on-close Job Object without breakaway, so the tree dies with it.
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows Job Object of the MCP client reaps the daemon")
+def test_daemon_spawned_by_the_proxy_outlives_the_session(harness):
+    async def scenario():
+        async with mcp_session(harness.proxy_params()) as session:
+            await session.list_tools()
 
     asyncio.run(scenario())
     status = harness.status()

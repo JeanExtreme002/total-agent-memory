@@ -48,6 +48,8 @@ MAX_OUTPUT_FIELDS = ("max_output_tokens", "max_completion_tokens", "max_tokens")
 PER_REQUEST_INPUT_ALLOWANCE = 256
 TOKENS_PER_MILLION = 1_000_000
 MAX_BODY_BYTES = 64 * 1024 * 1024
+# Windows reports 0o666 for every file and protects the user's profile with ACLs instead.
+POSIX_MODES = os.name == "posix"
 
 
 class BudgetError(RuntimeError):
@@ -103,10 +105,13 @@ def parse_env_file(text: str, variable: str = KEY_VARIABLE) -> str | None:
 
 
 def load_api_key(key_file: Path | None, environ: dict[str, str]) -> tuple[str, str]:
-    """Return (key, source description). The key itself is never logged."""
+    """Return (key, source description). The key itself is never logged.
+
+    On POSIX a key file readable by group/others is refused; Windows has no such mode bits.
+    """
     if key_file is not None and key_file.exists():
         mode = stat.S_IMODE(key_file.stat().st_mode)
-        if mode & 0o077:
+        if POSIX_MODES and mode & 0o077:
             raise BudgetError(f"{key_file} is readable by group/others (mode {oct(mode)}); run chmod 600")
         key = parse_env_file(key_file.read_text(encoding="utf-8"))
         if not key:

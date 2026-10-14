@@ -133,7 +133,9 @@ def test_full_round_trip_replace_into_a_new_machine(memory_dir, tmp_path):
     populate(memory_dir, RECORDS, backdate="2024-02-03T04:05:06.000000Z")
     bundle = tmp_path / "out" / "memory.tambundle"
     summary = export(memory_dir, bundle)
-    assert summary["kind"] == "full" and bundle.stat().st_mode & 0o777 == 0o600
+    assert summary["kind"] == "full"
+    if sys.platform != "win32":  # NTFS has no POSIX mode bits
+        assert bundle.stat().st_mode & 0o777 == 0o600
     assert b"Alpha service" not in bundle.read_bytes()
     assert not list((memory_dir / "backups").glob(".bundle-export-*"))
 

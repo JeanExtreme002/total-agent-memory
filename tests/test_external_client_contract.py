@@ -28,7 +28,9 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVER = ROOT / "src" / "server.py"
-PASSED_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "HF_HOME", "FASTEMBED_CACHE_PATH")
+# Windows CPython cannot open sockets without SYSTEMROOT, and Path.home() reads USERPROFILE, not HOME.
+PASSED_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "HF_HOME", "FASTEMBED_CACHE_PATH",
+              "SYSTEMROOT", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP")
 
 FACTS = [
     "The chief executive officer of Microsoft is Satya Nadella",

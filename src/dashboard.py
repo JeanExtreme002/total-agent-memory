@@ -29,7 +29,7 @@ import time
 import threading
 from collections.abc import Mapping
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from socketserver import ThreadingMixIn
+from socketserver import TCPServer, ThreadingMixIn
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs, urlsplit
 
@@ -4783,29 +4783,41 @@ class DashboardHandler(BaseHTTPRequestHandler):
             db.close()
 
 
+class DashboardHTTPServer(ThreadingMixIn, HTTPServer):
+    """Threaded HTTP server that starts listening without a reverse DNS lookup.
+
+    HTTPServer.server_bind resolves the bind address with socket.getfqdn
+    between bind() and listen(); a slow resolver (seen above 10 s on CI
+    macOS hosts) leaves the port bound but not accepting. The dashboard
+    never uses the resolved name.
+    """
+
+    daemon_threads = True
+    allow_reuse_address = True
+    allow_reuse_port = True
+
+    def server_bind(self) -> None:
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        except (AttributeError, OSError):
+            pass  # SO_REUSEPORT is optional (absent on Windows)
+        TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = host
+        self.server_port = port
+
+
 def main() -> None:
     """Start the dashboard HTTP server."""
     print(f"Memory dir: {MEMORY_DIR}")
     print(f"Database:   {DB_PATH} ({'exists' if DB_PATH.exists() else 'NOT FOUND'})")
     print(f"Dashboard running at http://localhost:{DASHBOARD_PORT}")
 
-    class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
-        daemon_threads = True
-        allow_reuse_address = True
-        allow_reuse_port = True
-
-        def server_bind(self) -> None:
-            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            try:
-                self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-            except (AttributeError, OSError):
-                pass
-            super().server_bind()
-
     # Bind to loopback by default; opt-in LAN via DASHBOARD_BIND.
     # Never expose DB / graph / filter contents to any non-127.0.0.1 host.
     bind_addr = os.environ.get("DASHBOARD_BIND", "127.0.0.1").strip() or "127.0.0.1"
-    server = ThreadingHTTPServer((bind_addr, DASHBOARD_PORT), DashboardHandler)
+    server = DashboardHTTPServer((bind_addr, DASHBOARD_PORT), DashboardHandler)
     print(f"Dashboard at http://{bind_addr}:{DASHBOARD_PORT}  "
           f"(DASHBOARD_BIND to override)")
     try:

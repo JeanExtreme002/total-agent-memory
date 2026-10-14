@@ -42,4 +42,8 @@ def open_store(memory_dir: Path) -> Iterator[Any]:
         if worker is not None:
             worker.stop()
         store.db.close()
+        # chromadb keeps chroma.sqlite3 open until the client is closed; Windows refuses to move an open file
+        close_chroma = getattr(store._chroma_client, "close", None)
+        if close_chroma is not None:
+            close_chroma()
         server.MEMORY_DIR = previous

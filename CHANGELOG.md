@@ -200,6 +200,18 @@ and versions use [Semantic Versioning](https://semver.org/).
   without an active exception`, exit -6) when the client closed it while the cross-encoder, the
   embedding backfill or the enrichment worker was still inside onnxruntime. The interpreter ended that
   thread through onnxruntime's C++ frames. Exit now waits up to 10 s for such threads first.
+- **The dashboard could take seconds to start answering.** Python's `HTTPServer` resolved the bind
+  address with a reverse DNS lookup between `bind()` and `listen()`; on a slow resolver (over 10 s on
+  GitHub's macOS hosts) the port stayed bound but accepted nothing. The dashboard now listens at once.
+- **`tam import-bundle --mode replace` failed on Windows** with "Access is denied": the store opened to
+  read the active model kept chromadb's `chroma.sqlite3` open, and Windows refuses to move an open
+  file. The chromadb client is now closed with the store.
+- **Rule compliance missed actions on a coarse clock.** An action stamped with the same time as the rule
+  surface it followed was not counted as evidence, which on Windows with Python 3.11/3.12 (a 15.6 ms
+  clock) dropped verdicts. The same instant now counts.
+- **A team server that lost its PostgreSQL lease was killed outright on Windows** instead of shutting
+  down through uvicorn: the shutdown request used `os.kill` on its own pid, which Windows turns into
+  `TerminateProcess`.
 - **Image OCR on macOS never returned text.** `src/ingestion/ocr.py` reached Apple Vision through pyobjc, which no install path declared, and when pyobjc was present every image still came back empty: the request handler was built with an options dict pyobjc 12 rejects (`key does not exist`), the result of `performRequests:error:` was unpacked as a tuple where pyobjc 12 returns a bool, and the recognition level was set to fast while the comment said accurate. All three are fixed, PDFs are now read by drawing the first page through Quartz (Vision does not take PDFs), and failures are logged instead of returning an unexplained empty string. pyobjc ships in the new macOS-only `[ocr]` extra (`requirements-ocr.txt` for clones). Reported in #36.
 - **`atomic_facts_backfill` stopped at the first record it could not extract.** A source over the extraction limit, a provider timeout or a malformed completion ended the whole sweep with a traceback. Such a record is now logged, counted and left pending for the next run; the result is `(processed, facts_created, skipped)`. Database errors still raise.
 

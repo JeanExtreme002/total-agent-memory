@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -16,6 +17,11 @@ import pytest
 
 ROOT = Path(__file__).parent.parent
 SCRIPT = ROOT / "scripts" / "dashboard-service.sh"
+
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="scripts/dashboard-service.sh is a bash script managing launchd/systemd/profile units; Windows has no POSIX dashboard service",
+)
 # Cold interpreter start plus the dashboard's import chain (pydantic, cryptography) on a CI runner.
 DASHBOARD_READY_TIMEOUT = 10.0
 # /status runs a launchctl probe and DB counts; one request must still answer well inside this.
@@ -159,9 +165,10 @@ def _wait_until_live(port: int, log_dir: Path, pid_path: Path,
             time.sleep(0.1)
     listeners = _listeners(port)
     if pid_path.exists():
-        # PYTHONFAULTHANDLER makes the stuck dashboard print every thread's stack to dashboard.err.
-        os.kill(int(pid_path.read_text(encoding="utf-8").strip()), signal.SIGABRT)
-        time.sleep(1)
+        # PYTHONFAULTHANDLER makes a stuck dashboard print every thread's stack to dashboard.err.
+        with contextlib.suppress(ProcessLookupError):  # it may already have exited
+            os.kill(int(pid_path.read_text(encoding="utf-8").strip()), signal.SIGABRT)
+            time.sleep(1)
     raise AssertionError(
         f"dashboard never became ready on port {port}: {last_error}\n--- listeners ---\n{listeners}\n"
         f"{_dashboard_output(log_dir)}")
@@ -235,7 +242,8 @@ def test_fallback_install_starts_dashboard_and_serves_status(tmp_path):
         assert log_path.exists()
     finally:
         if pid_path.exists():
-            os.kill(int(pid_path.read_text(encoding="utf-8").strip()), signal.SIGTERM)
+            with contextlib.suppress(ProcessLookupError):  # the readiness probe may have aborted it
+                os.kill(int(pid_path.read_text(encoding="utf-8").strip()), signal.SIGTERM)
 
 
 def test_fallback_install_does_not_start_second_dashboard_when_port_in_use(tmp_path):

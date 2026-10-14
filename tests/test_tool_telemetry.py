@@ -230,6 +230,7 @@ def test_normal_exit_flushes_the_partial_batch(db):
     assert rows(db) == [("memory_save", 1.5, 1, None, 3, 4, "minimal")]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGTERM is TerminateProcess on Windows: no handler runs")
 def test_sigterm_flushes_and_still_terminates_the_process(db):
     child = _child(db, wait=True)
     assert child.stdout.readline().strip() == "ready"

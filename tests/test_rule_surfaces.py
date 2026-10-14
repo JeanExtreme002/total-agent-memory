@@ -373,6 +373,18 @@ def test_followcheck_ignores_evidence_before_surface_or_outside_window(db, surfa
     assert outside.verdict == "not_applicable" and outside.evidence_count == 1
 
 
+def test_followcheck_counts_evidence_stamped_with_the_surface_time(db, surfacer):
+    # Regression: on a coarse clock (Windows before Python 3.13) the prompt hook's
+    # surface and the next tool call share a timestamp; the action was dropped.
+    s = surfaced(db, surfacer, "Run pytest with coverage before committing migrations", "pytest migrations")
+    at = datetime.fromisoformat(db.execute("SELECT surfaced_at FROM rule_surfaces WHERE id=?",
+                                           (s.surface_id,)).fetchone()[0])
+    [verdict] = [v for v in surfacer.followcheck("s1", [ActionEvidence("ran pytest --coverage on the migrations", at)],
+                                                 persist=False)
+                 if v.surface_id == s.surface_id]
+    assert verdict.verdict == "followed" and verdict.evidence_count == 1
+
+
 def test_followcheck_prohibition_violation_is_ignored(db, surfacer):
     s = surfaced(db, surfacer, "Never force-push to the main branch", "branch")
     [verdict] = surfacer.followcheck("s1", [act("git push --force origin main", 3)])

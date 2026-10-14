@@ -76,6 +76,7 @@ def test_parse_env_file_without_key_returns_none():
     assert bp.parse_env_file("OTHER=1\nOPENAI_API_KEY=\n") is None
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="NTFS has no group/other mode bits")
 def test_load_api_key_refuses_group_readable_file(tmp_path):
     key_file = tmp_path / "openai.env"
     key_file.write_text("OPENAI_API_KEY=sk-abc\n")
@@ -83,6 +84,14 @@ def test_load_api_key_refuses_group_readable_file(tmp_path):
     with pytest.raises(bp.BudgetError, match="chmod 600"):
         bp.load_api_key(key_file, {})
     os.chmod(key_file, 0o600)
+    assert bp.load_api_key(key_file, {}) == ("sk-abc", f"file:{key_file}")
+
+
+def test_load_api_key_skips_the_mode_check_without_posix_modes(tmp_path, monkeypatch):
+    key_file = tmp_path / "openai.env"
+    key_file.write_text("OPENAI_API_KEY=sk-abc\n")
+    os.chmod(key_file, 0o644)
+    monkeypatch.setattr(bp, "POSIX_MODES", False)
     assert bp.load_api_key(key_file, {}) == ("sk-abc", f"file:{key_file}")
 
 

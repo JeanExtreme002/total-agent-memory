@@ -147,3 +147,21 @@ def test_extra_hosts_come_from_bind_and_allow_list(port: int, monkeypatch: pytes
     monkeypatch.setattr(dashboard, "ALLOWED_HOSTS", extra)
     assert request(port, "GET", "/api/stats", {}, host=f"mem.lan:{port}")[0] == 200
     assert request(port, "GET", "/api/stats", {"Origin": f"http://mem.lan:{port}"}, host=f"mem.lan:{port}")[0] == 200
+
+
+def test_dashboard_server_listens_without_reverse_dns(monkeypatch):
+    # Regression: HTTPServer.server_bind ran socket.getfqdn between bind() and
+    # listen(); on GitHub macOS runners that took over 10 s, so the port stayed
+    # bound but refused to accept and the dashboard looked dead.
+    def no_lookup(*args):
+        raise AssertionError("the dashboard must not resolve its bind address")
+
+    monkeypatch.setattr(socket, "getfqdn", no_lookup)
+    server = dashboard.DashboardHTTPServer(("127.0.0.1", 0), dashboard.DashboardHandler)
+    try:
+        host, port = server.server_address[:2]
+        assert (server.server_name, server.server_port) == (host, port)
+        with socket.create_connection((host, port), timeout=2):
+            pass
+    finally:
+        server.server_close()

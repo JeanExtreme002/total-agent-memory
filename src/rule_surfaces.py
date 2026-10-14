@@ -747,8 +747,10 @@ class RuleSurfacer:
     ) -> list[FollowVerdict]:
         """Infer a verdict for each surface of ``session_id`` from action evidence.
 
-        Evidence counts for a surface only when it happened after the surface and
-        within ``window`` of it. Rules: a prohibition whose forbidden object
+        Evidence counts for a surface only when it happened at or after the surface
+        and within ``window`` of it. The same instant counts: hooks run in order, so
+        an action stamped with the surface's time came after it on a coarse clock
+        (about 15.6 ms on Windows before Python 3.13). Rules: a prohibition whose forbidden object
         appears in one action -> ignored; >= 3 overlapping tokens with >= 2
         distinctive -> followed; evidence with no overlap at all -> not
         applicable; otherwise unknown. With ``persist`` the decisive verdicts are
@@ -764,7 +766,7 @@ class RuleSurfacer:
         surfaces = _rows(self._db.execute(
             "SELECT s.id, s.rule_id, s.surfaced_at, s.followed, r.content "
             "FROM rule_surfaces s JOIN rules r ON r.id = s.rule_id "
-            "WHERE s.session_id = ? AND s.surfaced_at >= ? AND s.surfaced_at < ? "
+            "WHERE s.session_id = ? AND s.surfaced_at >= ? AND s.surfaced_at <= ? "
             "ORDER BY s.surfaced_at, s.id",
             (session_id, format_utc(earliest - window), format_utc(latest))))
         if not surfaces:
@@ -790,7 +792,7 @@ class RuleSurfacer:
     def _judge(surface: Mapping[str, Any], action_tokens: Sequence[tuple[datetime, set[str]]],
                window: timedelta, corpus: _Corpus) -> FollowVerdict:
         surfaced = datetime.fromisoformat(str(surface["surfaced_at"]))
-        evidence = [tokens for at, tokens in action_tokens if surfaced < at <= surfaced + window]
+        evidence = [tokens for at, tokens in action_tokens if surfaced <= at <= surfaced + window]
         surface_id, rule_id = str(surface["id"]), int(surface["rule_id"])
         if not evidence:
             return FollowVerdict(surface_id, rule_id, "unknown", 0, (), (), (), False)

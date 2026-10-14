@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -709,6 +710,8 @@ def test_tam_entry_point_dispatches_forget_auto(tmp_path, monkeypatch, capsys):
 
 BASH = shutil.which("bash")
 needs_bash = pytest.mark.skipif(BASH is None, reason="bash not available")
+# The hook helper starts `docker` with subprocess; Windows CreateProcess finds docker.exe, never a shebang fake.
+needs_fake_docker = pytest.mark.skipif(sys.platform == "win32", reason="shebang fake docker is not executable on Windows")
 
 
 def hook_env(mem: Path, home: Path, install: Path = ROOT, **extra: str) -> dict[str, str]:
@@ -828,9 +831,12 @@ def test_plugin_and_installer_register_the_ambient_hooks(tmp_path):
 
     plan = extras.plan_hooks(ROOT, clients.Host(tmp_path, "Darwin", {}, lambda _b: None), memory_dir=tmp_path / "m")
     settings_json = json.loads(plan.text)["hooks"]
-    assert any(h["command"].endswith("rule-reminder.sh") for b in settings_json["PreToolUse"] for h in b["hooks"])
-    assert any(h["command"].endswith("post-tool-use.sh")
-               for b in settings_json["PostToolUseFailure"] for h in b["hooks"])
+
+    def scripts(event: str) -> list[str]:
+        return [word for b in settings_json[event] for h in b["hooks"] for word in shlex.split(h["command"])]
+
+    assert any(s.endswith("rule-reminder.sh") for s in scripts("PreToolUse"))
+    assert any(s.endswith("post-tool-use.sh") for s in scripts("PostToolUseFailure"))
 
 
 @pytest.mark.parametrize("name,command", [
@@ -901,6 +907,7 @@ def fake_bin(tmp_path: Path, scripts: dict[str, str]) -> Path:
 
 
 @needs_bash
+@needs_fake_docker
 def test_docker_mode_runs_the_ambient_commands_inside_the_container(mem, tmp_path):
     sudo = add_rule(mem, SUDO_RULE, priority=8)
     bin_dir = fake_bin(tmp_path, {"docker": FAKE_DOCKER})
@@ -966,6 +973,7 @@ def test_ambient_module_cli_reports_bad_input(tmp_path):
 
 
 @needs_bash
+@pytest.mark.skipif(sys.platform == "win32", reason="install-docker.sh is a POSIX-only installer")
 def test_docker_installer_registers_the_ambient_hooks(tmp_path):
     root = tmp_path / "checkout"
     shutil.copytree(HOOKS, root / "hooks", ignore=shutil.ignore_patterns("_docker-launchers", "__pycache__"))
@@ -1048,22 +1056,28 @@ def test_correction_capture_setting_is_forwarded_and_catalogued():
     assert AmbientSettings.load(Path("/nonexistent"), {CORRECTION_CAPTURE_ENV: "false"}).correction_capture is False
 
 
-@needs_bash
-def test_prompt_hook_drafts_a_correction_natively_and_in_docker(mem, tmp_path):
-    env = hook_env(mem, tmp_path)
-    payload = {"hook_event_name": "UserPromptSubmit", "session_id": "C1", "cwd": "/w/proj", "prompt": CORRECTION}
-    proc = run_hook("user-prompt-submit.sh", payload, env)
-    assert proc.returncode == 0
-    assert len(drafts(mem)) == 1
+CORRECTION_PAYLOAD = {"hook_event_name": "UserPromptSubmit", "session_id": "C1", "cwd": "/w/proj",
+                      "prompt": CORRECTION}
 
+
+@needs_bash
+def test_prompt_hook_drafts_a_correction_natively(mem, tmp_path):
+    proc = run_hook("user-prompt-submit.sh", CORRECTION_PAYLOAD, hook_env(mem, tmp_path))
+    assert proc.returncode == 0
+    assert [row[6] for row in drafts(mem)] == ["proj"]
+
+
+@needs_bash
+@needs_fake_docker
+def test_prompt_hook_drafts_a_correction_in_docker(mem, tmp_path):
     bin_dir = fake_bin(tmp_path, {"docker": FAKE_DOCKER})
     host_mem = tmp_path / "host-mem"
     host_mem.mkdir()
     docker_env = hook_env(host_mem, tmp_path, TAM_DOCKER="1", PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
                           FAKE_DOCKER_LOG=str(tmp_path / "docker.log"), FAKE_SRC=str(ROOT / "src"),
                           FAKE_MEM=str(mem), FAKE_PYTHON=sys.executable)
-    other = {**payload, "session_id": "C2", "cwd": "/w/other", "prompt": "сколько раз: не коммить в main"}
+    other = {**CORRECTION_PAYLOAD, "session_id": "C2", "cwd": "/w/other", "prompt": "сколько раз: не коммить в main"}
     assert run_hook("user-prompt-submit.sh", other, docker_env).returncode == 0
     off = {**other, "session_id": "C3", "cwd": "/w/third", "prompt": "how many times: rebase before merge"}
     assert run_hook("user-prompt-submit.sh", off, {**docker_env, "TAM_CORRECTION_CAPTURE": "false"}).returncode == 0
-    assert [row[6] for row in drafts(mem)] == ["proj", "other"]
+    assert [row[6] for row in drafts(mem)] == ["other"]
