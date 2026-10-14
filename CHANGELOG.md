@@ -212,6 +212,11 @@ and versions use [Semantic Versioning](https://semver.org/).
 - **A team server that lost its PostgreSQL lease was killed outright on Windows** instead of shutting
   down through uvicorn: the shutdown request used `os.kill` on its own pid, which Windows turns into
   `TerminateProcess`.
+- **A directory replica (`TAM_TEAM_REPLICA_URL=file:///C:/...`) did not work on Windows**: the URL was
+  read as the path `/C:/...`, so `tam-team replication init-bucket` and restore failed. The URL is now
+  converted with the platform's own rules.
+- **Refused dashboard writes could reach the client as a reset connection on Windows** (WinError 10053):
+  the 403/405 answer went out before the request body was read. A small body is now read first.
 - **Image OCR on macOS never returned text.** `src/ingestion/ocr.py` reached Apple Vision through pyobjc, which no install path declared, and when pyobjc was present every image still came back empty: the request handler was built with an options dict pyobjc 12 rejects (`key does not exist`), the result of `performRequests:error:` was unpacked as a tuple where pyobjc 12 returns a bool, and the recognition level was set to fast while the comment said accurate. All three are fixed, PDFs are now read by drawing the first page through Quartz (Vision does not take PDFs), and failures are logged instead of returning an unexplained empty string. pyobjc ships in the new macOS-only `[ocr]` extra (`requirements-ocr.txt` for clones). Reported in #36.
 - **`atomic_facts_backfill` stopped at the first record it could not extract.** A source over the extraction limit, a provider timeout or a malformed completion ended the whole sweep with a traceback. Such a record is now logged, counted and left pending for the next run; the result is `(processed, facts_created, skipped)`. Database errors still raise.
 

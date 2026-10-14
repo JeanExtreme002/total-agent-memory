@@ -4454,13 +4454,25 @@ class DashboardHandler(BaseHTTPRequestHandler):
         rejection = request_rejection(self.headers.get("Host"), self.headers.get("Origin"), ALLOWED_HOSTS)
         if rejection is None:
             return False
-        self._send_error(*rejection)
+        self._refuse(*rejection)
         return True
+
+    def _refuse(self, status: int, message: str) -> None:
+        """Refuse a request whose body was not read yet.
+
+        Closing a socket with unread request bytes makes Windows reset the
+        connection, and the client then gets WinError 10053 instead of this
+        answer; a small body is read and dropped first.
+        """
+        length = self.headers.get("Content-Length", "")
+        if length.isdigit() and int(length) <= dashboard_settings.MAX_BODY_BYTES:
+            self.rfile.read(int(length))
+        self._send_error(status, message)
 
     def _reject_method(self) -> None:
         """Memory pages are read-only: every non-GET method except the settings writes is refused."""
         if not self._refused():
-            self._send_error(405, "Method not allowed")
+            self._refuse(405, "Method not allowed")
 
     do_PUT = do_PATCH = do_DELETE = do_OPTIONS = _reject_method
 
@@ -4483,11 +4495,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         path = urlparse(self.path).path.rstrip("/")
         if path not in POST_ROUTES:
-            self._send_error(405, "Method not allowed")
+            self._refuse(405, "Method not allowed")
             return
         rejection = self._write_rejection()
         if rejection is not None:
-            self._send_error(*rejection)
+            self._refuse(*rejection)
             return
         try:
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])) or b"{}")

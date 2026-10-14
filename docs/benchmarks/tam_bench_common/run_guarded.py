@@ -51,6 +51,7 @@ from tam_bench_common.budget_proxy import (
 EXIT_BUDGET_STOP = 3
 POLL_INTERVAL_S = 0.5
 DEFAULT_PRICES = Path(__file__).resolve().parent / "prices.json"
+WINDOWS = os.name == "nt"
 
 
 def log(event: str, **fields) -> None:
@@ -58,16 +59,37 @@ def log(event: str, **fields) -> None:
                       "event": event, **fields}), file=sys.stderr, flush=True)
 
 
+def start_group(command: list[str], env: dict[str, str]) -> subprocess.Popen:
+    """Start ``command`` as the leader of its own process group, so a stop reaches its children."""
+    if WINDOWS:
+        return subprocess.Popen(command, env=env, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
+    return subprocess.Popen(command, env=env, start_new_session=True)
+
+
+def signal_group(process: subprocess.Popen, force: bool) -> None:
+    """Ask the group to stop, or kill the whole process tree when ``force``."""
+    if not WINDOWS:
+        os.killpg(process.pid, signal.SIGKILL if force else signal.SIGTERM)
+    elif force:
+        # Windows has no process-group kill; taskkill /T ends the child's whole tree.
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(process.pid)], capture_output=True, check=False)
+    else:
+        process.send_signal(signal.CTRL_BREAK_EVENT)
+
+
 def stop_group(process: subprocess.Popen, grace_s: float) -> None:
     try:
-        os.killpg(process.pid, signal.SIGTERM)
+        signal_group(process, force=False)
     except ProcessLookupError:
         return
+    except OSError as error:
+        # CTRL_BREAK needs a console the child shares; without one only the forced kill below works.
+        log("graceful_stop_unavailable", error=str(error))
     try:
         process.wait(timeout=grace_s)
     except subprocess.TimeoutExpired:
         try:
-            os.killpg(process.pid, signal.SIGKILL)
+            signal_group(process, force=True)
         except ProcessLookupError:
             return
         process.wait()
@@ -124,7 +146,7 @@ def main(argv: list[str]) -> int:
 
     started_wall = datetime.now(UTC).isoformat()
     started = time.monotonic()
-    process = subprocess.Popen(command, env=env, start_new_session=True)
+    process = start_group(command, env)
     received_signal = {"value": None}
 
     def forward(signum, _frame):

@@ -313,3 +313,31 @@ def test_run_guarded_refuses_default_key_with_foreign_upstream(tmp_path):
          "--allow-model", "gpt-5.2", "--out-dir", str(tmp_path / "run"), "--upstream", "http://127.0.0.1:9/v1",
          "--", sys.executable, "-c", "pass"], capture_output=True, text=True, timeout=60, check=False)
     assert done.returncode == 2 and "explicit --key-file" in done.stderr
+
+
+def test_stop_group_on_windows_breaks_then_kills_the_tree(monkeypatch):
+    # Regression: stop_group called os.killpg, which Windows lacks, so a budget trip crashed the guard
+    # instead of stopping the harness.
+    import signal
+
+    from tam_bench_common import run_guarded as rg
+
+    sent, ran = [], []
+
+    class Child:
+        pid = 4242
+
+        def send_signal(self, signum):
+            sent.append(signum)
+
+        def wait(self, timeout=None):
+            if timeout is not None:
+                raise subprocess.TimeoutExpired("harness", timeout)
+            return 1
+
+    monkeypatch.setattr(rg, "WINDOWS", True)
+    monkeypatch.setattr(signal, "CTRL_BREAK_EVENT", 1, raising=False)
+    monkeypatch.setattr(rg.subprocess, "run", lambda command, **kwargs: ran.append(command))
+    rg.stop_group(Child(), grace_s=0.01)
+    assert sent == [signal.CTRL_BREAK_EVENT]
+    assert ran == [["taskkill", "/T", "/F", "/PID", "4242"]]

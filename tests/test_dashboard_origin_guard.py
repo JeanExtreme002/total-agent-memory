@@ -165,3 +165,26 @@ def test_dashboard_server_listens_without_reverse_dns(monkeypatch):
             pass
     finally:
         server.server_close()
+
+
+def test_refusal_reads_a_small_unread_body_first():
+    # Regression: refusing before reading the body left bytes unread; Windows then reset the
+    # connection and clients saw WinError 10053 instead of the 403/405 answer.
+    import io
+    from email.message import Message
+
+    def handler(length: int) -> tuple:
+        h = dashboard.DashboardHandler.__new__(dashboard.DashboardHandler)
+        h.headers = Message()
+        h.headers["Content-Length"] = str(length)
+        h.rfile = io.BytesIO(b"x" * length)
+        sent = []
+        h._send_error = lambda status, message: sent.append(status)
+        return h, sent
+
+    small, sent = handler(64)
+    small._refuse(405, "Method not allowed")
+    assert small.rfile.tell() == 64 and sent == [405]
+    huge, sent = handler(dashboard.dashboard_settings.MAX_BODY_BYTES + 1)
+    huge._refuse(413, "Request body missing or too large")
+    assert huge.rfile.tell() == 0 and sent == [413]

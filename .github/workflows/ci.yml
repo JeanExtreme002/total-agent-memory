@@ -68,12 +68,10 @@ jobs:
             blocking: true
           - os: macos-15
             blocking: true
-          # The full suite has never been run on Windows in CI (the smoke
-          # workflow's native job runs the Windows server regressions, which
-          # stay blocking there). Failures show as a red cell here but do not
-          # fail `ci-green` until the Windows run is green and this flips to true.
+          # The full suite runs on Windows too; POSIX-only tests skip there with
+          # the reason, and a Windows failure fails `ci-green` like any other OS.
           - os: windows-2022
-            blocking: false
+            blocking: true
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ !matrix.blocking }}
     env:

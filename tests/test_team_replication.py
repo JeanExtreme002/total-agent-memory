@@ -158,7 +158,8 @@ def test_write_config_is_private_and_creates_the_watched_directory(tmp_path):
     if sys.platform != 'win32':  # NTFS has no POSIX mode bits
         assert stat.S_IMODE(out.stat().st_mode) == 0o600
         assert stat.S_IMODE((root / 'workspaces').stat().st_mode) == 0o700
-    assert str(root.resolve() / 'workspaces') in out.read_text()
+    # The config quotes paths as JSON strings (valid YAML), so Windows backslashes appear escaped.
+    assert f"dir: {json.dumps(str(root.resolve() / 'workspaces'))}" in out.read_text()
     with pytest.raises(Conflict, match='identity database'):
         replication.write_config(tmp_path / 'empty', ReplicationSettings.from_env(S3_ENV), out)
 
@@ -246,7 +247,7 @@ def fake_litestream(tmp_path: Path, sources: dict[str, Path], calls: list) -> Li
         if command[1] == 'version':
             return subprocess.CompletedProcess(command, 0, 'v0.5.17\n', '')
         output, database = Path(command[command.index('-o') + 1]), command[-1]
-        relative = next(rel for rel in sources if database.endswith(rel))
+        relative = next(rel for rel in sources if Path(database).as_posix().endswith(rel))
         if sources[relative] is None:
             return subprocess.CompletedProcess(command, 0, '', '')
         if sources[relative] == 'fail':
@@ -501,3 +502,13 @@ def test_cli_refuses_replication_commands_on_postgres(tmp_path, monkeypatch, cap
     with pytest.raises(SystemExit) as exit_info:
         team_cli.main()
     assert exit_info.value.code == 1 and 'PostgreSQL tooling' in capsys.readouterr().err
+
+
+def test_directory_replica_url_maps_to_a_local_path(monkeypatch):
+    # Regression: file:///C:/srv parsed to "/C:/srv", an invalid path on Windows, so
+    # `replication init-bucket` and every directory replica failed there.
+    import nturl2path
+
+    assert ReplicationSettings(url='file:///srv/tam%20replica').directory == Path('/srv/tam replica')
+    monkeypatch.setattr(replication, 'url2pathname', nturl2path.url2pathname)
+    assert str(ReplicationSettings(url='file:///C:/srv/tam%20replica').directory) == 'C:\\srv\\tam replica'
